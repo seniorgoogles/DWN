@@ -4,7 +4,7 @@ import setuptools
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CppExtension
 
-cpp_dir = os.path.join('src', 'torch_dwn', 'custom_operators', 'cpp')
+cpp_dir = os.path.join('src', 'torch_dwn', 'custom_operators', 'cuda')
 cuda_dir = os.path.join('src', 'torch_dwn', 'custom_operators', 'cuda')
 
 ext_modules = []
