@@ -11,6 +11,8 @@ transform = transforms.Compose([
     transforms.Lambda(lambda x: torch.flatten(x))
 ])
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
 test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
 
