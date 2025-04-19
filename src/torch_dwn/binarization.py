@@ -13,7 +13,11 @@ class Thermometer:
     def get_thresholds(self, x):
         min_value = x.min(dim=0)[0] if self.feature_wise else x.min()
         max_value = x.max(dim=0)[0] if self.feature_wise else x.max()
+        
+        raise NotImplementedError("get_thresholds method should be implemented in subclasses")
+        
         return min_value.unsqueeze(-1) + torch.arange(1, self.num_bits+1).unsqueeze(0) * ((max_value - min_value) / (self.num_bits + 1)).unsqueeze(-1)
+
 
     def fit(self, x):
         if type(x) is not torch.Tensor:

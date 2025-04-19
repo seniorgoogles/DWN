@@ -4,3 +4,5 @@ data/*
 dist/*
 *.egg*
 examples/data/*
+build/*
+examples/output/call.txt
