@@ -6,3 +6,12 @@ dist/*
 examples/data/*
 build/*
 examples/output/call.txt
+*.txt
+*.log
+*.vhdl
+*.pyc
+*.lp
+*.so
+WORK.*
+work/
+*.vhd
