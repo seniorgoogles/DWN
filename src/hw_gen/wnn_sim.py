@@ -62,7 +62,12 @@ class WeightlessNeuralNetwork:
 
 def convert_to_wnn_data(sample: torch.Tensor, mapping):
     sample_list = [int(x) for x in sample.cpu().flatten().numpy().tolist()]
+    
+    print(f"{len(sample_list)=}")
+    print(f"{len(mapping)=}")
+    
     output_str = "".join(str(sample_list[i]) for i in mapping)
+    
     return output_str
 
 

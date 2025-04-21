@@ -142,9 +142,10 @@ def main(args):
     # Speichere Mapping-Daten
     mapping_path = os.path.join(args.output_folder, 'mapping.txt')
     with open(mapping_path, 'w') as f:
-        for mapping in lut_layer.mapping.weights.argmax(dim=0):
+        argmax_vals = lut_layer.mapping.weights.argmax(dim=0)
+        for i, mapping in enumerate(argmax_vals):
             f.write(f"{mapping}")
-            if mapping != lut_layer.mapping.weights.argmax(dim=0)[-1]:
+            if i != len(argmax_vals) - 1:
                 f.write(";")
 
 

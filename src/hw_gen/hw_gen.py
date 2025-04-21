@@ -9,7 +9,6 @@ from groupsum_gen import GroupSumGenerator
 from lutlayer_gen import LutLayerGenerator
 from wnn_gen import WnnGenerator
 
-
 def read_lut_data(filename):
     """Read LUT data from a file and return it as a list of strings."""
     with open(filename, "r") as f:
@@ -120,6 +119,13 @@ def main():
     lut_data   = read_lut_data("luts_data.txt")
     lut_count, lut_n = read_model_config("model_config.txt")
     num_classes = 5
+    
+    
+    print(f"lut_count: {lut_count}, lut_n: {lut_n}")
+    print(f"num_classes: {num_classes}")
+    
+    # Wait for enter
+    input()
 
     # 3) Generate VHDL modules
     LutLayerGenerator.generate(
@@ -153,55 +159,20 @@ def main():
         output_dir="output/groupsum",
     )
 
-    WnnGenerator.generate(
-        input_num=lut_count,
-        output_num=num_classes,
-        output_dir="output/wnn",
-        input_file_list=[
-            "output/lutlayer/lutlayer.vhdl",
-            "output/popcount/popcnt.vhdl",
-            "output/groupsum/groupsum.vhdl",
-        ]
-    )
-    
-    # 1) Generate top‐level into `synth/`
-    WnnGenerator.generate(
-        input_num=45,
-        output_num=5,
-        output_dir="synth",
-        input_file_list=[
-          "output/lutlayer/lutlayer.vhdl",
-          "output/popcount/popcnt.vhdl",
-          "output/groupsum/groupsum.vhdl"
-        ]
-    )
-
-    # 2) Generate TB into `tb/`
     WnnGenerator.generate_tb(
-        input_num=45,
-        output_num=5,
-        output_dir="tb",
-        dataset_file="dataset.txt",
-        pred_file="predictions.txt"
+      num_classes=num_classes,
+      num_neurons=lut_count,
+      num_inputs=lut_n,
+      dataset_file="/home/mmecik/repositories/DWN/src/hw_gen/dataset.txt",
+      pred_file="/home/mmecik/repositories/DWN/src/hw_gen/predictions.txt",
+      vhdl_files=[
+        "/home/mmecik/repositories/DWN/src/hw_gen/output/popcount/popcnt.vhdl",
+        "/home/mmecik/repositories/DWN/src/hw_gen/output/groupsum/groupsum.vhdl",
+        "/home/mmecik/repositories/DWN/src/hw_gen/output/lutlayer/lutlayer.vhdl"
+      ],
+      output_dir="tb"
     )
 
-
-    """
-    # 4) Extract components and port info for FixMultiAdder_* entities
-    for path in glob.glob("output/**/*.vhdl", recursive=True):
-        entity = VHDLEntity(path)
-        if entity.parse(entity_pattern=r""):
-            # write component declaration
-            comp = entity.to_component()
-            comp_file = os.path.join(os.path.dirname(path), f"{entity.name}_component.vhdl")
-            with open(comp_file, "w") as f:
-                f.write(comp + "\n")
-            print(f"Wrote component for {entity.name} -> {comp_file}")
-
-            # example: query port 'R'
-            tdecl, width = entity.get_port_info("R")
-            print(f"Port 'R': type={tdecl}, width={width}")
-    """
     print("Generation and entity parsing complete.")
 
 
