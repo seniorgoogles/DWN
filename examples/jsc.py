@@ -83,6 +83,11 @@ def main(args):
         y_train = y_train[:num]
 
     thermometer = dwn.DistributiveThermometer(200).fit(x_train)
+    
+    # Zu testen
+    #thermometer.threshold = ((thermometer.thresholds * 1000).to(torch.int32)).to(torch.float32)
+
+    
     x_train = thermometer.binarize(x_train).flatten(start_dim=1)
     x_test = thermometer.binarize(x_test).flatten(start_dim=1)
     

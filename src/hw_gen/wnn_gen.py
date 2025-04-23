@@ -123,14 +123,18 @@ class VHDLEntity:
 class WnnGenerator:
   
   @staticmethod
-  def generate_tb(num_classes, num_neurons, num_inputs, dataset_file, pred_file, vhdl_files, output_dir):
+  def generate_tb(num_classes, num_neurons, num_inputs, dataset_file, pred_file, vhdl_files, inputs_wnn, lut_mapping, output_dir):
     
+    vhdl_component_thermometer = VHDLEntity("/home/mmecik/repositories/DWN/src/hw_gen/output/thermometer/thermometer.vhdl")
     vhdl_component_fixmult = VHDLEntity("/home/mmecik/repositories/DWN/src/hw_gen/output/popcount/popcnt.vhdl")
     vhdl_component_groupsum = VHDLEntity("/home/mmecik/repositories/DWN/src/hw_gen/output/groupsum/groupsum.vhdl")
     vhdl_component_lutlayer = VHDLEntity("/home/mmecik/repositories/DWN/src/hw_gen/output/lutlayer/lutlayer.vhdl")
     
-    vhdl_component_groupsum.parse(entity_pattern=r"^GroupSum_")
-    vhdl_component_lutlayer.parse(entity_pattern=r"^LUTLayer_")
+    #vhdl_component_groupsum.parse(entity_pattern=r"^GroupSum_")
+    #vhdl_component_lutlayer.parse(entity_pattern=r"^LUTLayer_")
+  
+    if not vhdl_component_thermometer.parse():
+      raise RuntimeError("Failed to parse VHDL component")
   
     if not vhdl_component_fixmult.parse(entity_pattern=r"^FixMultiAdder_"):
       raise RuntimeError("Failed to parse VHDL component")
@@ -150,10 +154,9 @@ class WnnGenerator:
     src_ports_fixmult = vhdl_component_fixmult.get_port_names()
     dst_ports_fixmult = ["R_all"] + ["data_out" for src_port in src_ports_fixmult[1:]]
     
-    print(f"Source ports for FixMultiAdder: {src_ports_fixmult}")
-    print(f"Destination ports for FixMultiAdder: {dst_ports_fixmult}")
     
-
+    src_ports_thermometer = vhdl_component_thermometer.get_port_names()
+    dst_ports_thermometer = ["clk", "reset", "start"] + ["data_in" for src_port in src_ports_thermometer[3:]]
     # Create the port mapping for FixMultiAdder
     portmap_fixmult = []
     
@@ -168,6 +171,20 @@ class WnnGenerator:
         mapping_per_fixmult.append(f"{bit_address} downto {bit_address}")
       
       portmap_fixmult.append(mapping_per_fixmult)
+      
+      
+    # Port mapping Thermometer
+    thermometer_width = vhdl_component_thermometer.get_port_info("data_out")[1]
+    
+    portmap_thermometer = []
+    for i in range(thermometer_width):
+      mapping_per_thermometer = []
+      mapping_per_thermometer.append(f"clk")
+      mapping_per_thermometer.append(f"reset")
+      mapping_per_thermometer.append(f"start")
+      mapping_per_thermometer.append(f"thermometer_encoder({i})")
+      portmap_thermometer.append(mapping_per_thermometer)
+
 
     print(f"Port mapping for FixMultiAdder: {portmap_fixmult}")
     
@@ -188,11 +205,14 @@ end entity;
 architecture Behavioral of WNN_tb is
   constant clk_period : time := 10 ns;
   
+  type thermometer_array is array (0 to {inputs_wnn}) of std_logic_vector({thermometer_width} downto 0);
+  
   -- Signals
   signal clk        : std_logic := '0';
   signal reset      : std_logic := '0';
   signal data_in    : std_logic_vector({(num_neurons * num_inputs)-1} downto 0) := (others => '0');
   signal data_out   : std_logic_vector({(num_neurons)-1} downto 0);
+  signal wnn_input  : thermometer_encoder;
   signal R_all      : std_logic_vector({(r_width_popcnt * num_classes)-1} downto 0);
   signal prediction : std_logic_vector({num_classes-1} downto 0);
   
@@ -201,6 +221,7 @@ architecture Behavioral of WNN_tb is
   file pred_file : text open read_mode is "predictions.txt";
   
     -- Component declarations
+  {vhdl_component_thermometer.to_component()}
   component LUTLayer
     port(
       data_in  : in  std_logic_vector({(num_neurons * num_inputs) - 1} downto 0);
@@ -221,6 +242,8 @@ architecture Behavioral of WNN_tb is
     ----------------------------------------------------------------
     -- DUT instantiations
     ----------------------------------------------------------------
+  {vhdl_component_thermometer.create_multiple_instances_partial_port(src_ports_thermometer, dst_ports_thermometer, portmap_thermometer)}
+  
   {vhdl_component_lutlayer.create_instance_map_full_port(vhdl_component_lutlayer.get_port_names(), ["data_in", "data_out"])}
   
   {vhdl_component_fixmult.create_multiple_instances_partial_port(src_ports_fixmult, dst_ports_fixmult, num_classes, portmap_fixmult)}

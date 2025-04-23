@@ -4,10 +4,21 @@ import re
 import glob
 
 # Replace these imports with your actual generator modules
+from thermometer_gen import ThermometerGen
 from popcnt_gen import PopCountGenerator
 from groupsum_gen import GroupSumGenerator
 from lutlayer_gen import LutLayerGenerator
 from wnn_gen import WnnGenerator
+
+def read_mapping_file(filename):
+    """Read mapping file and return a dictionary of LUTs."""
+    lut_map = []
+    with open(filename, "r") as f:
+        # It's just one line, but it is seperated by ";"
+        line = f.readline().strip()
+        for lut in line.split(";"):
+            lut_map.append(lut)
+    return lut_map
 
 def read_lut_data(filename):
     """Read LUT data from a file and return it as a list of strings."""
@@ -20,16 +31,21 @@ def read_model_config(filename):
     Read model configuration from a file and return (luts_num, luts_inp_num).
     Raises if not found.
     """
-    luts_num = luts_inp_num = -1
+    luts_num = -1
+    luts_inp_num = -1
+    thermometer_bins = -1
+    
     with open(filename, "r") as f:
         for line in f:
             if "luts_num" in line:
                 luts_num = int(line.split("=", 1)[1].strip())
             elif "luts_inp_num" in line:
                 luts_inp_num = int(line.split("=", 1)[1].strip())
+            elif "thermometer_bins" in line:
+                thermometer_bins = int(line.split("=", 1)[1].strip())
     if luts_num < 0 or luts_inp_num < 0:
         raise ValueError("Missing luts_num or luts_inp_num in config")
-    return luts_num, luts_inp_num
+    return luts_num, luts_inp_num, thermometer_bins
 
 
 class VHDLEntity:
@@ -117,15 +133,22 @@ def main():
 
     # 2) Read LUT data and model config
     lut_data   = read_lut_data("luts_data.txt")
-    lut_count, lut_n = read_model_config("model_config.txt")
+    lut_count, lut_n, thermometer_bins = read_model_config("model_config.txt")
     num_classes = 5
-    
+    lut_mapping = read_mapping_file("/home/mmecik/repositories/DWN/src/hw_gen/mapping.txt")
     
     print(f"lut_count: {lut_count}, lut_n: {lut_n}")
     print(f"num_classes: {num_classes}")
     
     # Wait for enter
     input()
+    
+    ThermometerGen.generate(
+        bins=thermometer_bins,
+        scale_factor=100000,
+        dataset_str="jsc",
+        output_dir="output/thermometer",
+    )
 
     # 3) Generate VHDL modules
     LutLayerGenerator.generate(
@@ -158,7 +181,7 @@ def main():
         num_classes=num_classes,
         output_dir="output/groupsum",
     )
-
+    
     WnnGenerator.generate_tb(
       num_classes=num_classes,
       num_neurons=lut_count,
@@ -166,10 +189,13 @@ def main():
       dataset_file="/home/mmecik/repositories/DWN/src/hw_gen/dataset.txt",
       pred_file="/home/mmecik/repositories/DWN/src/hw_gen/predictions.txt",
       vhdl_files=[
+        "/home/mmecik/repositories/DWN/src/hw_gen/output/thermometer/thermometer.vhdl",
         "/home/mmecik/repositories/DWN/src/hw_gen/output/popcount/popcnt.vhdl",
         "/home/mmecik/repositories/DWN/src/hw_gen/output/groupsum/groupsum.vhdl",
         "/home/mmecik/repositories/DWN/src/hw_gen/output/lutlayer/lutlayer.vhdl"
       ],
+      inputs_wnn=16,
+      lut_mapping=lut_mapping,
       output_dir="tb"
     )
 
