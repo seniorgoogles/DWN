@@ -62,6 +62,7 @@ def main(args):
     luts_num = args.luts_num
     luts_inp_num = args.luts_inp_num
     batch_size = args.batch_size
+    thermometer_bits = args.thermometer_bits
 
     # Erstelle Ausgabeverzeichnis falls nicht vorhanden
     os.makedirs(args.output_folder, exist_ok=True)
@@ -82,7 +83,7 @@ def main(args):
         x_train = x_train[:num]
         y_train = y_train[:num]
 
-    thermometer = dwn.DistributiveThermometer(200).fit(x_train)
+    thermometer = dwn.DistributiveThermometer(thermometer_bits).fit(x_train)
     
     # Zu testen
     #thermometer.threshold = ((thermometer.thresholds * 1000).to(torch.int32)).to(torch.float32)
@@ -160,6 +161,7 @@ if __name__ == '__main__':
     parser.add_argument('--num-examples', type=int, default=None, help='Number of examples to use for training')
     parser.add_argument('--luts-num', type=int, default=15, help='Number of LUTs')
     parser.add_argument('--luts-inp-num', type=int, default=6, help='Number of inputs per LUT')
+    parser.add_argument('--thermometer_bits', '-b', type=int, default=200, help='Number of thermometer bits')
     parser.add_argument('--epochs', type=int, default=1, help='Number of epochs for training')
     parser.add_argument('--batch-size', type=int, default=100, help='Batch size for training')
     args = parser.parse_args()
@@ -172,7 +174,7 @@ if __name__ == '__main__':
     if os.path.exists(args.output_folder):
         shutil.rmtree(args.output_folder)
 
-    os.makedirs(args.output_folder)
+    os.makedirs(args.output_folder) 
         
     # Create subfolder for this run with the datetime format YYYYMMDD_HHMMSS_run    
     #now = datetime.datetime.now()
