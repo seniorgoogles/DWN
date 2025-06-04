@@ -19,7 +19,11 @@ def evaluate(model, x_test, y_test, device):
     return acc
 
 def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs, batch_size, device, skip_batches=500):
+    test_acc = 0.0
+    best_acc = 0.0
+    
     n_samples = x_train.shape[0]
+    print(f"{epochs=}, {batch_size=}, {n_samples=}")
     
     for epoch in range(epochs):
         model.train()
@@ -54,6 +58,17 @@ def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_
         train_acc = correct_train / total_train
         test_acc = evaluate(model, x_test, y_test, device)
         print(f'Epoch {epoch + 1} Summary: Train Accuracy: {train_acc:.4f}, Test Accuracy: {test_acc:.4f}')
+        
+        if test_acc > best_acc:
+            best_acc = test_acc
+            print(f"Best Test Accuracy: {best_acc:.4f}")
+            torch.save(model.state_dict(), os.path.join(args.output_folder, 'best.pth'))
+    
+    print("Best Test Accuracy: ", best_acc)
+    print("Final Test Accuracy: ", test_acc)
+    torch.save(model.state_dict(), os.path.join(args.output_folder, 'last.pth'))
+
+    return best_acc
 
 def main(args):
     # Set device und Hyperparameter
@@ -62,7 +77,10 @@ def main(args):
     luts_num = args.luts_num
     luts_inp_num = args.luts_inp_num
     batch_size = args.batch_size
+    
+    thermometer = None
     thermometer_bits = args.thermometer_bits
+    thermometer_type = args.thermometer
 
     # Erstelle Ausgabeverzeichnis falls nicht vorhanden
     os.makedirs(args.output_folder, exist_ok=True)
@@ -83,20 +101,25 @@ def main(args):
         x_train = x_train[:num]
         y_train = y_train[:num]
 
-    thermometer = dwn.DistributiveThermometer(thermometer_bits).fit(x_train)
+    if thermometer_type == "distributive_thermometer":
+        thermometer = dwn.DistributiveThermometer(thermometer_bits).fit(x_train)
+    elif thermometer_type == "thermometer": 
+        thermometer = dwn.Thermometer(thermometer_bits).fit(x_train)
+    else:
+        raise ValueError(f"Unknown thermometer type: {thermometer_type}")
     
-    # Zu testen
-    #thermometer.threshold = ((thermometer.thresholds * 1000).to(torch.int32)).to(torch.float32)
+    #print(f"Thermometer thresholds: {thermometer.thresholds=}")
+    
+    # Print colorful that the dataset is fitted to the thermometer
+    print(f"\033[92mThermometer fitted to dataset with {x_train.shape[0]} samples and {x_train.shape[1]} features.\033[0m")
 
-    
     x_train = thermometer.binarize(x_train).flatten(start_dim=1)
     x_test = thermometer.binarize(x_test).flatten(start_dim=1)
     
-    print(thermometer.get_thresholds(x_train))
+    #print(thermometer.get_thresholds(x_train))
     
     y_train = torch.tensor(y_train, dtype=torch.int64)
     y_test = torch.tensor(y_test, dtype=torch.int64)
-
 
     lut_layer = dwn.LUTLayer(x_train.size(1), luts_num, n=luts_inp_num, mapping='learnable') 
     group_sum = dwn.GroupSum(k=num_output, tau=1/0.3)
@@ -106,10 +129,21 @@ def main(args):
         group_sum
     ).cuda(device)
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.1, step_size=14)
-
-    train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs=args.epochs, batch_size=args.batch_size, device=device)
+    # 1e-2(30), 1e-3(30), 1e-4(30), 1e-5(10)
+    epochs = 14
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.012123)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.1, step_size=5)
+    train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs=epochs, batch_size=batch_size, device=device)
+    
+    epochs = 14
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.1, step_size=5)
+    train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs=epochs, batch_size=batch_size, device=device)
+    
+    epochs = 4
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.1, step_size=5)
+    train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs=epochs, batch_size=batch_size, device=device)
     
     # Modell speichern
     model_path = os.path.join(args.output_folder, 'model.pth')
@@ -131,7 +165,8 @@ def main(args):
     config_path = os.path.join(args.output_folder, 'model_config.txt')
     with open(config_path, 'w') as f:
         f.write(f"{luts_num=}\n")
-        f.write(f"{luts_inp_num=}")
+        f.write(f"{luts_inp_num=}\n")
+        f.write(f"{thermometer_type=}")
 
     # Speichere LUT-Daten als CSV
     luts_data_path = os.path.join(args.output_folder, 'luts_data.txt')
@@ -161,8 +196,9 @@ if __name__ == '__main__':
     parser.add_argument('--num-examples', type=int, default=None, help='Number of examples to use for training')
     parser.add_argument('--luts-num', type=int, default=15, help='Number of LUTs')
     parser.add_argument('--luts-inp-num', type=int, default=6, help='Number of inputs per LUT')
+    parser.add_argument('--thermometer', '-t', type=str, default="thermometer", help='Thermometer type, thermometer or distributive_thermometer')
     parser.add_argument('--thermometer_bits', '-b', type=int, default=200, help='Number of thermometer bits')
-    parser.add_argument('--epochs', type=int, default=1, help='Number of epochs for training')
+    parser.add_argument('--epochs', type=int, default=15, help='Number of epochs for training')
     parser.add_argument('--batch-size', type=int, default=100, help='Batch size for training')
     args = parser.parse_args()
     

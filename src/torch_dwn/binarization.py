@@ -53,3 +53,50 @@ class DistributiveThermometer(Thermometer):
         thresholds = data[indicies] 
 
         return torch.permute(thresholds, (*list(range(1, thresholds.ndim)), 0))
+class QuantFixedPointDistributiveThermometer(Thermometer):
+    def __init__(self, num_bits=8, feature_wise=True):
+        super().__init__(num_bits, feature_wise)
+
+    def get_thresholds(self, x):
+        # --- Fixed-Point Quantizer (MSB, LSB Calculation) ---
+        if self.feature_wise:
+            x_min = x.min(dim=0, keepdim=True)[0]
+            x_max = x.max(dim=0, keepdim=True)[0]
+        else:
+            x_min = x.min()
+            x_max = x.max()
+
+        # Determine MSB: highest power of 2 covering x_max
+        max_abs = torch.maximum(torch.abs(x_min), torch.abs(x_max))
+        msb = torch.ceil(torch.log2(max_abs + 1e-8))  # +eps for numerical stability
+        msb = msb.int()
+
+        # Determine LSB from bit width
+        bit_width = self.num_bits
+        lsb = msb - bit_width
+        # lsb is negative usually (indicating fractional bits)
+
+        # Compute scaling factor
+        scale = 2 ** (-lsb)
+
+        # Quantize
+        x_quant = torch.round(x * scale) / scale
+
+        # Debug print (optional)
+        # print(f"MSB: {msb}, LSB: {lsb}, Scale: {scale}")
+
+        # --- Distributive Thermometer Encoding ---
+        data = torch.sort(x_quant.flatten())[0] if not self.feature_wise else torch.sort(x_quant, dim=0)[0]
+
+        device = x.device
+        indices = torch.tensor(
+            [int(data.shape[0] * i / (self.num_bits + 1)) for i in range(1, self.num_bits + 1)],
+            device=device
+        )
+
+        thresholds = data[indices]
+
+        if self.feature_wise:
+            thresholds = thresholds.transpose(0, -1)
+
+        return thresholds
