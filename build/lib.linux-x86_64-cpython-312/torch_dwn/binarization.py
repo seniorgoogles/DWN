@@ -22,16 +22,17 @@ class Thermometer:
         self.thresholds = self.get_thresholds(x)
         return self
     
-    def binarize(self, x, bit_width=-1):
-        quant_identity = QuantIdentity(return_quant_tensor=True, bit_width=8)
+    def binarize(self, x):
+        quant_identity = QuantIdentity(return_quant_tensor=True, bit_width=2)
 
         if self.thresholds is None:
             raise 'need to fit before calling apply'
         if type(x) is not torch.Tensor:
             x = torch.tensor(x)
         
-        if bit_width > 0:
-            x = quant_identity(x).tensor
+        x = quant_identity(x)
+        print(x)
+        raise NotImplementedError("Binarization method not implemented for this thermometer type.")
 
         x = x.unsqueeze(-1)
         return (x > self.thresholds).float()
