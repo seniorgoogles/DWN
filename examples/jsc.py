@@ -27,33 +27,31 @@ def evaluate(model, x_test, y_test, device):
         acc = (pred == y_test.numpy()).sum() / y_test.shape[0]
     return acc
 
-def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs, batch_size, device, skip_batches=100, verbose=True, experiment_id=None):
+def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs, batch_size, device, experiment_id=None, skip_batches=1000):
     n_samples = x_train.shape[0]
     n_batches = (n_samples + batch_size - 1) // batch_size
     
-    if verbose:
-        print(f"📊 Training Configuration:")
-        print(f"   • Training samples: {n_samples:,}")
-        print(f"   • Batch size: {batch_size}")
-        print(f"   • Batches per epoch: {n_batches}")
-        print(f"   • Total epochs: {epochs}")
-        print(f"   • Device: {device}")
-        print(f"   • Optimizer: {type(optimizer).__name__}")
-        print(f"   • Initial LR: {optimizer.param_groups[0]['lr']:.2e}")
-        
-        # Model parameters
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        print(f"   • Total parameters: {total_params:,}")
-        print(f"   • Trainable parameters: {trainable_params:,}")
-        print(f"   • Model size: {total_params * 4 / 1024 / 1024:.2f} MB (float32)")
+    print(f"📊 Training Configuration:")
+    print(f"   • Training samples: {n_samples:,}")
+    print(f"   • Batch size: {batch_size}")
+    print(f"   • Batches per epoch: {n_batches}")
+    print(f"   • Total epochs: {epochs}")
+    print(f"   • Device: {device}")
+    print(f"   • Optimizer: {type(optimizer).__name__}")
+    print(f"   • Initial LR: {optimizer.param_groups[0]['lr']:.2e}")
+    
+    # Model parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"   • Total parameters: {total_params:,}")
+    print(f"   • Trainable parameters: {trainable_params:,}")
+    print(f"   • Model size: {total_params * 4 / 1024 / 1024:.2f} MB (float32)")
     
     epoch_start_time = datetime.datetime.now()
     
     for epoch in range(epochs):
-        if verbose:
-            print(f"\n🔄 Epoch {epoch + 1}/{epochs} - {datetime.datetime.now().strftime('%H:%M:%S')}")
-            print("─" * 60)
+        print(f"\n🔄 Epoch {epoch + 1}/{epochs} - {datetime.datetime.now().strftime('%H:%M:%S')}")
+        print("─" * 60)
         
         model.train()
         permutation = torch.randperm(n_samples)
@@ -89,21 +87,22 @@ def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_
             batch_time = (datetime.datetime.now() - batch_start).total_seconds()
             batch_times.append(batch_time)
             
-            if verbose and batch_index % skip_batches == 0:
-                avg_batch_time = sum(batch_times[-skip_batches:]) / min(len(batch_times), skip_batches)
-                samples_per_sec = batch_size / avg_batch_time
-                remaining_batches = n_batches - batch_index
-                eta_seconds = remaining_batches * avg_batch_time
-                eta_time = datetime.datetime.now() + datetime.timedelta(seconds=eta_seconds)
-                
-                progress = batch_index / n_batches
-                bar_length = 30
-                filled_length = int(bar_length * progress)
-                bar = '█' * filled_length + '░' * (bar_length - filled_length)
-                
+            # Show progress for every batch
+            avg_batch_time = sum(batch_times[-10:]) / min(len(batch_times), 10)  # Average of last 10 batches
+            samples_per_sec = batch_size / avg_batch_time
+            remaining_batches = n_batches - batch_index
+            eta_seconds = remaining_batches * avg_batch_time
+            eta_time = datetime.datetime.now() + datetime.timedelta(seconds=eta_seconds)
+            
+            progress = batch_index / n_batches
+            bar_length = 30
+            filled_length = int(bar_length * progress)
+            bar = '█' * filled_length + '░' * (bar_length - filled_length)
+            
+            if batch_index % skip_batches == 0 or batch_index == n_batches:
                 print(f"   Batch {batch_index:4d}/{n_batches} [{bar}] {progress*100:5.1f}% | "
-                      f"Loss: {loss.item():.4f} | Acc: {batch_acc:.4f} | "
-                      f"{samples_per_sec:.0f} samples/s | ETA: {eta_time.strftime('%H:%M:%S')}")
+                    f"Loss: {loss.item():.4f} | Acc: {batch_acc:.4f} | "
+                    f"{samples_per_sec:.0f} samples/s | ETA: {eta_time.strftime('%H:%M:%S')}")
         
         # End of epoch
         old_lr = optimizer.param_groups[0]['lr']
@@ -115,95 +114,84 @@ def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_
         avg_loss = epoch_loss / n_batches
         test_acc = evaluate(model, x_test, y_test, device)
         
-        if verbose:
-            print(f"\n✅ Epoch {epoch + 1} Complete:")
-            print(f"   • Duration: {epoch_time:.1f}s ({epoch_time/60:.1f}m)")
-            print(f"   • Avg batch time: {sum(batch_times)/len(batch_times):.3f}s")
-            print(f"   • Samples/second: {n_samples/epoch_time:.0f}")
-            print(f"   • Average loss: {avg_loss:.4f}")
-            print(f"   • Train accuracy: {train_acc:.4f} ({correct_train}/{total_train})")
-            print(f"   • Test accuracy: {test_acc:.4f}")
-            print(f"   • Learning rate: {old_lr:.2e} → {new_lr:.2e}")
-            
-            # Memory usage if CUDA
-            if torch.cuda.is_available():
-                memory_allocated = torch.cuda.memory_allocated(device) / 1024**3
-                memory_reserved = torch.cuda.memory_reserved(device) / 1024**3
-                print(f"   • GPU memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
+        print(f"\n✅ Epoch {epoch + 1} Complete:")
+        print(f"   • Duration: {epoch_time:.1f}s ({epoch_time/60:.1f}m)")
+        print(f"   • Avg batch time: {sum(batch_times)/len(batch_times):.3f}s")
+        print(f"   • Samples/second: {n_samples/epoch_time:.0f}")
+        print(f"   • Average loss: {avg_loss:.4f}")
+        print(f"   • Train accuracy: {train_acc:.4f} ({correct_train}/{total_train})")
+        print(f"   • Test accuracy: {test_acc:.4f}")
+        print(f"   • Learning rate: {old_lr:.2e} → {new_lr:.2e}")
+        
+        # Memory usage if CUDA
+        if torch.cuda.is_available():
+            memory_allocated = torch.cuda.memory_allocated(device) / 1024**3
+            memory_reserved = torch.cuda.memory_reserved(device) / 1024**3
+            print(f"   • GPU memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
     
     # Return final test accuracy after all epochs
     final_test_acc = evaluate(model, x_test, y_test, device)
     
-    if verbose:
-        total_training_time = (datetime.datetime.now() - epoch_start_time).total_seconds()
-        print(f"\n🎯 Training Phase Complete:")
-        print(f"   • Total time: {total_training_time:.1f}s ({total_training_time/60:.1f}m)")
-        print(f"   • Final test accuracy: {final_test_acc:.4f}")
-        print(f"   • Avg time per epoch: {total_training_time/epochs:.1f}s")
+    total_training_time = (datetime.datetime.now() - epoch_start_time).total_seconds()
+    print(f"\n🎯 Training Phase Complete:")
+    print(f"   • Total time: {total_training_time:.1f}s ({total_training_time/60:.1f}m)")
+    print(f"   • Final test accuracy: {final_test_acc:.4f}")
+    print(f"   • Avg time per epoch: {total_training_time/epochs:.1f}s")
     
     return final_test_acc
 
-def prepare_dataset(quant_bits, thermometer_bits, thermometer_type, num_examples=None, random_state=42, verbose=True):
+def prepare_dataset(quant_bits, thermometer_bits, thermometer_type, num_examples=None, random_state=42):
     """Prepare dataset with fresh initialization for each experiment"""
-    if verbose:
-        print(f"\n📁 Dataset Preparation:")
-        print(f"   • Loading OpenML dataset 42468...")
+    print(f"\n📁 Dataset Preparation:")
+    print(f"   • Loading OpenML dataset 42468...")
     
     # Dataset laden und aufteilen
     dataset_start = datetime.datetime.now()
     dataset = openml.datasets.get_dataset(42468)
     df_features, df_labels, _, attribute_names = dataset.get_data(dataset_format='dataframe', target=dataset.default_target_attribute)
     
-    if verbose:
-        print(f"   • Dataset loaded in {(datetime.datetime.now() - dataset_start).total_seconds():.2f}s")
-        print(f"   • Features shape: {df_features.shape}")
-        print(f"   • Feature names: {list(df_features.columns)[:5]}{'...' if len(df_features.columns) > 5 else ''}")
-        print(f"   • Target: {dataset.default_target_attribute}")
+    print(f"   • Dataset loaded in {(datetime.datetime.now() - dataset_start).total_seconds():.2f}s")
+    print(f"   • Features shape: {df_features.shape}")
+    print(f"   • Feature names: {list(df_features.columns)[:5]}{'...' if len(df_features.columns) > 5 else ''}")
+    print(f"   • Target: {dataset.default_target_attribute}")
     
     features = df_features.values.astype(np.float32)
     label_names = list(df_labels.unique())
     labels = np.array(df_labels.map(lambda x : label_names.index(x)).values)
     num_output = labels.max() + 1
 
-    if verbose:
-        print(f"   • Unique classes: {len(label_names)} {label_names}")
-        print(f"   • Class distribution: {dict(zip(label_names, np.bincount(labels)))}")
-        print(f"   • Features dtype: {features.dtype}, shape: {features.shape}")
-        print(f"   • Labels dtype: {labels.dtype}, shape: {labels.shape}")
+    print(f"   • Unique classes: {len(label_names)} {label_names}")
+    print(f"   • Class distribution: {dict(zip(label_names, np.bincount(labels)))}")
+    print(f"   • Features dtype: {features.dtype}, shape: {features.shape}")
+    print(f"   • Labels dtype: {labels.dtype}, shape: {labels.shape}")
 
     x_train, x_test, y_train, y_test = train_test_split(features, labels, train_size=0.8, random_state=random_state)
     
-    if verbose:
-        print(f"   • Train/test split (80/20): {x_train.shape[0]:,} / {x_test.shape[0]:,} samples")
+    print(f"   • Train/test split (80/20): {x_train.shape[0]:,} / {x_test.shape[0]:,} samples")
     
     # Begrenze Anzahl der Trainingsbeispiele, falls angegeben
     original_train_size = x_train.shape[0]
     if num_examples is not None:
         x_train = x_train[:num_examples]
         y_train = y_train[:num_examples]
-        if verbose:
-            print(f"   • Limited training samples: {original_train_size:,} → {x_train.shape[0]:,}")
+        print(f"   • Limited training samples: {original_train_size:,} → {x_train.shape[0]:,}")
     
     # Quantize dataset if quantization is enabled
     if quant_bits > 0:
-        if verbose:
-            print(f"   • Applying quantization ({quant_bits} bits)...")
+        print(f"   • Applying quantization ({quant_bits} bits)...")
         quant_start = datetime.datetime.now()
         quant_identity = QuantIdentity(return_quant_tensor=True, bit_width=quant_bits, act_quant=Int8ActPerTensorFixedPoint)
         x_test = quant_identity(torch.tensor(x_test)).tensor
         x_train = quant_identity(torch.tensor(x_train)).tensor
-        if verbose:
-            quant_time = (datetime.datetime.now() - quant_start).total_seconds()
-            print(f"   • Quantization completed in {quant_time:.2f}s")
+        quant_time = (datetime.datetime.now() - quant_start).total_seconds()
+        print(f"   • Quantization completed in {quant_time:.2f}s")
     else:
         x_train = torch.tensor(x_train)
         x_test = torch.tensor(x_test)
-        if verbose:
-            print(f"   • No quantization applied")
+        print(f"   • No quantization applied")
 
     # Thermometer encoding
-    if verbose:
-        print(f"   • Applying {thermometer_type} thermometer encoding ({thermometer_bits} bits)...")
+    print(f"   • Applying {thermometer_type} thermometer encoding ({thermometer_bits} bits)...")
     
     therm_start = datetime.datetime.now()
     if thermometer_type == 'distributive':
@@ -221,45 +209,41 @@ def prepare_dataset(quant_bits, thermometer_bits, thermometer_type, num_examples
     y_train = torch.tensor(y_train, dtype=torch.int64)
     y_test = torch.tensor(y_test, dtype=torch.int64)
     
-    if verbose:
-        therm_time = (datetime.datetime.now() - therm_start).total_seconds()
-        print(f"   • Thermometer encoding completed in {therm_time:.2f}s")
-        print(f"   • Shape transformation: {x_train_orig_shape} → {x_train.shape}")
-        print(f"   • Test shape transformation: {x_test_orig_shape} → {x_test.shape}")
-        print(f"   • Binary features per sample: {x_train.shape[1]:,}")
-        print(f"   • Memory usage - Train: {x_train.numel() * 4 / 1024**2:.1f} MB")
-        print(f"   • Memory usage - Test: {x_test.numel() * 4 / 1024**2:.1f} MB")
+    therm_time = (datetime.datetime.now() - therm_start).total_seconds()
+    print(f"   • Thermometer encoding completed in {therm_time:.2f}s")
+    print(f"   • Shape transformation: {x_train_orig_shape} → {x_train.shape}")
+    print(f"   • Test shape transformation: {x_test_orig_shape} → {x_test.shape}")
+    print(f"   • Binary features per sample: {x_train.shape[1]:,}")
+    print(f"   • Memory usage - Train: {x_train.numel() * 4 / 1024**2:.1f} MB")
+    print(f"   • Memory usage - Test: {x_test.numel() * 4 / 1024**2:.1f} MB")
     
     return x_train, x_test, y_train, y_test, num_output
 
-def run_single_experiment(config, device, verbose=True):
+def run_single_experiment(config, device):
     """Run a single experiment with given configuration"""
     experiment_start = datetime.datetime.now()
     
-    if verbose:
-        print(f"\n🧪 Experiment {config['experiment_id']} Configuration:")
-        print("─" * 50)
-        for key, value in config.items():
-            if key != 'experiment_id':
-                print(f"   • {key.replace('_', ' ').title()}: {value}")
-        print("─" * 50)
+    print(f"\n🧪 Experiment {config['experiment_id']} Configuration:")
+    print("─" * 50)
+    for key, value in config.items():
+        if key != 'experiment_id':
+            print(f"   • {key.replace('_', ' ').title()}: {value}")
+    print("─" * 50)
     
     # Prepare fresh dataset for this experiment
     x_train, x_test, y_train, y_test, num_output = prepare_dataset(
         config['quant_bits'], 
         config['thermometer_bits'], 
         config['thermometer_type'],
-        config.get('num_examples', None),
-        verbose=verbose
+        config.get('num_examples', None)
     )
     
-    if verbose:
-        print(f"\n🏗️  Model Architecture:")
-        print(f"   • Input features: {x_train.size(1):,}")
-        print(f"   • Number of LUTs: {config['luts_num']}")
-        print(f"   • LUT input size: {config['luts_inp_num']}")
-        print(f"   • Output classes: {num_output}")
-        print(f"   • Group sum tau: {1/0.3:.3f}")
+    print(f"\n🏗️  Model Architecture:")
+    print(f"   • Input features: {x_train.size(1):,}")
+    print(f"   • Number of LUTs: {config['luts_num']}")
+    print(f"   • LUT input size: {config['luts_inp_num']}")
+    print(f"   • Output classes: {num_output}")
+    print(f"   • Group sum tau: {1/0.3:.3f}")
     
     # Setup model
     model_start = datetime.datetime.now()
@@ -271,51 +255,50 @@ def run_single_experiment(config, device, verbose=True):
         group_sum
     ).cuda(device)
     
-    if verbose:
-        model_setup_time = (datetime.datetime.now() - model_start).total_seconds()
-        print(f"   • Model created in {model_setup_time:.3f}s")
-        
-        # Detailed model information
-        print(f"\n🔧 Model Details:")
-        print(f"   • LUT Layer:")
-        print(f"     - Total LUTs: {len(lut_layer.luts)}")
-        print(f"     - LUT shape: {lut_layer.luts[0].shape if len(lut_layer.luts) > 0 else 'N/A'}")
-        print(f"     - Mapping type: learnable")
-        print(f"     - Mapping shape: {lut_layer.mapping.weights.shape}")
-        print(f"   • Group Sum Layer:")
-        print(f"     - Output groups: {num_output}")
-        print(f"     - Temperature (tau): {group_sum.tau}")
-        
-        # Memory estimation
-        total_params = sum(p.numel() for p in model.parameters())
-        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        model_size_mb = total_params * 4 / 1024 / 1024  # float32
-        print(f"   • Parameters: {total_params:,} total, {trainable_params:,} trainable")
-        print(f"   • Model size: {model_size_mb:.2f} MB")
+    model_setup_time = (datetime.datetime.now() - model_start).total_seconds()
+    print(f"   • Model created in {model_setup_time:.3f}s")
     
-    # Variables to track best model
+    # Detailed model information
+    print(f"\n🔧 Model Details:")
+    print(f"   • LUT Layer:")
+    print(f"     - Total LUTs: {len(lut_layer.luts)}")
+    print(f"     - LUT shape: {lut_layer.luts[0].shape if len(lut_layer.luts) > 0 else 'N/A'}")
+    print(f"     - Mapping type: learnable")
+    print(f"     - Mapping shape: {lut_layer.mapping.weights.shape}")
+    print(f"   • Group Sum Layer:")
+    print(f"     - Output groups: {num_output}")
+    print(f"     - Temperature (tau): {group_sum.tau}")
+    
+    # Memory estimation
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    model_size_mb = total_params * 4 / 1024 / 1024  # float32
+    print(f"   • Parameters: {total_params:,} total, {trainable_params:,} trainable")
+    print(f"   • Model size: {model_size_mb:.2f} MB")
+    
+    # Variables to track best model and final model
     best_accuracy = 0.0
     best_model_state = None
+    final_model_state = None
     best_phase_info = ""
+    final_phase_info = ""
     
     if config['epochs'] == -1:
         lr_list = [1e-2, 1e-3, 1e-4]
         epochs_list = [14, 14, 4]
 
-        if verbose:
-            print(f"\n🎯 Multi-Phase Training Schedule:")
-            for i, (lr, epochs) in enumerate(zip(lr_list, epochs_list), 1):
-                print(f"   Phase {i}: {epochs} epochs @ lr={lr:.1e}")
-            print("─" * 60)
+        print(f"\n🎯 Multi-Phase Training Schedule:")
+        for i, (lr, epochs) in enumerate(zip(lr_list, epochs_list), 1):
+            print(f"   Phase {i}: {epochs} epochs @ lr={lr:.1e}")
+        print("─" * 60)
 
         for phase, (lr, epochs) in enumerate(zip(lr_list, epochs_list), 1):
             phase_start = datetime.datetime.now()
             
-            if verbose:
-                print(f"\n🚀 Training Phase {phase}/3")
-                print(f"   • Learning Rate: {lr:.1e}")
-                print(f"   • Epochs: {epochs}")
-                print(f"   • Started: {phase_start.strftime('%H:%M:%S')}")
+            print(f"\n🚀 Training Phase {phase}/3")
+            print(f"   • Learning Rate: {lr:.1e}")
+            print(f"   • Epochs: {epochs}")
+            print(f"   • Started: {phase_start.strftime('%H:%M:%S')}")
             
             optimizer = torch.optim.Adam(model.parameters(), lr=lr)
             scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.1, step_size=14)
@@ -323,34 +306,35 @@ def run_single_experiment(config, device, verbose=True):
             phase_accuracy = train_and_evaluate(
                 model, optimizer, scheduler, x_train, y_train, x_test, y_test, 
                 epochs=epochs, batch_size=config['batch_size'], device=device, 
-                skip_batches=config.get('skip_batches', 25), verbose=verbose, experiment_id=config['experiment_id']
+                experiment_id=config['experiment_id']
             )
             
             phase_time = (datetime.datetime.now() - phase_start).total_seconds()
             
-            if verbose:
-                print(f"\n📈 Phase {phase} Results:")
-                print(f"   • Duration: {phase_time:.1f}s ({phase_time/60:.1f}m)")
-                print(f"   • Final Test Accuracy: {phase_accuracy:.4f}")
+            print(f"\n📈 Phase {phase} Results:")
+            print(f"   • Duration: {phase_time:.1f}s ({phase_time/60:.1f}m)")
+            print(f"   • Final Test Accuracy: {phase_accuracy:.4f}")
             
             # Check if this is the best accuracy so far
             if phase_accuracy > best_accuracy:
                 best_accuracy = phase_accuracy
                 best_model_state = copy.deepcopy(model.state_dict())
                 best_phase_info = f"Phase {phase} (lr={lr:.1e}, epochs={epochs})"
-                if verbose:
-                    print(f"   🏆 NEW BEST ACCURACY: {best_accuracy:.4f}")
+                print(f"   🏆 NEW BEST ACCURACY: {best_accuracy:.4f}")
             else:
-                if verbose:
-                    print(f"   📊 Current best remains: {best_accuracy:.4f}")
+                print(f"   📊 Current best remains: {best_accuracy:.4f}")
             
-            if verbose and phase < len(lr_list):
+            # Always save the state from the final phase
+            if phase == len(lr_list):
+                final_model_state = copy.deepcopy(model.state_dict())
+                final_phase_info = f"Final Phase {phase} (lr={lr:.1e}, epochs={epochs})"
+            
+            if phase < len(lr_list):
                 print(f"\n⏭️  Proceeding to Phase {phase + 1}...")
     else:    
-        if verbose:
-            print(f"\n🚀 Single Phase Training:")
-            print(f"   • Epochs: {config['epochs']}")
-            print(f"   • Learning Rate: 1e-2")
+        print(f"\n🚀 Single Phase Training:")
+        print(f"   • Epochs: {config['epochs']}")
+        print(f"   • Learning Rate: 1e-2")
         
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.1, step_size=14)
@@ -358,34 +342,38 @@ def run_single_experiment(config, device, verbose=True):
         final_accuracy = train_and_evaluate(
             model, optimizer, scheduler, x_train, y_train, x_test, y_test, 
             epochs=config['epochs'], batch_size=config['batch_size'], device=device, 
-            skip_batches=config.get('skip_batches', 25), verbose=verbose, experiment_id=config['experiment_id']
+            experiment_id=config['experiment_id']
         )
         
+        # For single phase, best and final are the same
         best_accuracy = final_accuracy
         best_model_state = copy.deepcopy(model.state_dict())
+        final_model_state = copy.deepcopy(model.state_dict())
         best_phase_info = f"Single phase ({config['epochs']} epochs)"
+        final_phase_info = f"Single phase ({config['epochs']} epochs)"
 
     experiment_time = (datetime.datetime.now() - experiment_start).total_seconds()
     
-    if verbose:
-        print(f"\n🎉 Experiment {config['experiment_id']} Complete!")
-        print(f"   • Total Duration: {experiment_time:.1f}s ({experiment_time/60:.1f}m)")
-        print(f"   • Best Accuracy: {best_accuracy:.4f}")
-        print(f"   • Best Model from: {best_phase_info}")
-        print(f"   • Samples processed: {x_train.shape[0] * (32 if config['epochs'] == -1 else config['epochs']):,}")
-        
-        # Performance metrics
-        if experiment_time > 0:
-            throughput = x_train.shape[0] * (32 if config['epochs'] == -1 else config['epochs']) / experiment_time
-            print(f"   • Training throughput: {throughput:.0f} samples/second")
+    print(f"\n🎉 Experiment {config['experiment_id']} Complete!")
+    print(f"   • Total Duration: {experiment_time:.1f}s ({experiment_time/60:.1f}m)")
+    print(f"   • Best Accuracy: {best_accuracy:.4f}")
+    print(f"   • Best Model from: {best_phase_info}")
+    print(f"   • Final Model from: {final_phase_info}")
+    print(f"   • Samples processed: {x_train.shape[0] * (32 if config['epochs'] == -1 else config['epochs']):,}")
+    
+    # Performance metrics
+    if experiment_time > 0:
+        throughput = x_train.shape[0] * (32 if config['epochs'] == -1 else config['epochs']) / experiment_time
+        print(f"   • Training throughput: {throughput:.0f} samples/second")
 
     # Add experiment results to config
     config['best_accuracy'] = best_accuracy
     config['best_phase_info'] = best_phase_info
+    config['final_phase_info'] = final_phase_info
     config['experiment_duration'] = experiment_time
     config['timestamp'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     
-    return config, best_model_state
+    return config, best_model_state, final_model_state
 
 def generate_experiment_configs(args):
     """Generate all experiment configurations based on provided parameters"""
@@ -410,7 +398,6 @@ def generate_experiment_configs(args):
                 'quant_bits': quant_bits,
                 'epochs': args.epochs,
                 'batch_size': args.batch_size,
-                'skip_batches': args.skip_batches,
                 'num_examples': args.num_examples,
                 'experiment_id': len(configs) + 1
             }
@@ -426,7 +413,6 @@ def generate_experiment_configs(args):
             'quant_bits': args.quant_bits,
             'epochs': args.epochs,
             'batch_size': args.batch_size,
-            'skip_batches': args.skip_batches,
             'num_examples': args.num_examples,
             'experiment_id': 1
         }]
@@ -651,7 +637,6 @@ def main(args):
     print(f"   • Total experiments: {len(configs)}")
     print(f"   • Experiment mode: {args.experiment_mode}")
     print(f"   • Results folder: {base_folder}")
-    print(f"   • Verbose output: {args.verbose}")
     
     if len(configs) > 1:
         print(f"\n📋 Parameter Variations:")
@@ -746,11 +731,13 @@ def main(args):
         os.makedirs(exp_folder, exist_ok=True)
         
         # Run experiment
-        result_config, best_model_state = run_single_experiment(config, device, verbose=args.verbose)
+        result_config, best_model_state, final_model_state = run_single_experiment(config, device)
         
-        # Save individual experiment results
-        model_path = os.path.join(exp_folder, 'model.pth')
-        torch.save(best_model_state, model_path)
+        # Save both models
+        best_model_path = os.path.join(exp_folder, 'best_model.pth')
+        final_model_path = os.path.join(exp_folder, 'final_model.pth')
+        torch.save(best_model_state, best_model_path)
+        torch.save(final_model_state, final_model_path)
         
         config_path = os.path.join(exp_folder, 'config.json')
         with open(config_path, 'w') as f:
@@ -813,7 +800,6 @@ if __name__ == '__main__':
     parser.add_argument('--output_folder', type=str, default='experiments', help='Base folder for experiment outputs')
     parser.add_argument('--experiment-mode', type=str, default='single', choices=['single', 'grid'], 
                        help='Single experiment or grid search')
-    parser.add_argument('--verbose', action='store_true', help='Verbose output during training')
     
     # Dataset parameters
     parser.add_argument('--num-examples', type=int, default=None, help='Number of examples to use for training')
@@ -839,7 +825,6 @@ if __name__ == '__main__':
                        help='Type of thermometer encoding')
     parser.add_argument('--epochs', type=int, default=-1, help='Number of epochs for training, for -1 use default epochs for each learning rate')
     parser.add_argument('--batch-size', type=int, default=100, help='Batch size for training')
-    parser.add_argument('--skip-batches', type=int, default=25, help='Show progress every N batches (lower = more frequent updates)')
     
     args = parser.parse_args()
     
