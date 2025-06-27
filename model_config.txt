@@ -1,2 +1,0 @@
-luts_num=5
-luts_inp_num=2
