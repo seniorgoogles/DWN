@@ -1,0 +1,3 @@
+luts_num=200
+luts_inp_num=6
+thermometer_type='distributive_thermometer'

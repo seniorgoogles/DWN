@@ -13,6 +13,8 @@ import shutil
 
 from brevitas.nn import QuantIdentity
 from brevitas.quant import Int8ActPerTensorFixedPoint
+from brevitas.quant import Int8ActPerTensorFixedPointMSE
+from brevitas.quant import Int8ActPerTensorFixedPointMinMaxInit
 
 def evaluate(model, x_test, y_test, device):
     model.eval()
@@ -74,6 +76,9 @@ def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_
     return best_acc
 
 def main(args):
+    
+    QUANTIZER = Int8ActPerTensorFixedPointMSE
+    
     # Set device und Hyperparameter
     device = 'cuda:0'
     epochs = args.epochs
@@ -83,8 +88,10 @@ def main(args):
     quant_bits = args.quant_bits if hasattr(args, 'quant_bits') else -1 
     
     thermometer = None
+    quant_thermometer = None
     thermometer_bits = args.thermometer_bits
     thermometer_type = args.thermometer
+    ptq_enabled = args.ptq
 
     # Erstelle Ausgabeverzeichnis falls nicht vorhanden
     os.makedirs(args.output_folder, exist_ok=True)
@@ -105,13 +112,35 @@ def main(args):
         x_train = x_train[:num]
         y_train = y_train[:num]
         
+    # Create a copy of the dataset for quantization
+    x_test_quant = x_test.copy()
+    x_train_quant = x_train.copy()
+        
     # Quantize dataset if quantization is enabled
-    if quant_bits > 0:
+    if quant_bits > 0 and ptq_enabled is False:
         print(f"   • Applying quantization ({quant_bits} bits)...")
         quant_start = datetime.datetime.now()
-        quant_identity = QuantIdentity(return_quant_tensor=True, bit_width=quant_bits, act_quant=Int8ActPerTensorFixedPoint)
-        x_test = quant_identity(torch.tensor(x_test)).tensor
-        x_train = quant_identity(torch.tensor(x_train)).tensor
+        quant_identity = QuantIdentity(return_quant_tensor=True, bit_width=quant_bits, act_quant=QUANTIZER)
+        
+        # Go through the features and quantize them
+        for i in range(x_test.shape[1]):
+            x_test[:, i] = quant_identity(torch.tensor(x_test[:, i])).tensor.detach().numpy()
+            x_train[:, i] = quant_identity(torch.tensor(x_train[:, i])).tensor.detach().numpy()
+        
+        #x_test = quant_identity(torch.tensor(x_test)).tensor
+        #x_train = quant_identity(torch.tensor(x_train)).tensor
+        quant_time = (datetime.datetime.now() - quant_start).total_seconds()
+        print(f"   • Quantization completed in {quant_time:.2f}s")
+        
+    elif quant_bits > 0:
+        
+        print(f"   • Applying quantization for PTQ ({quant_bits} bits)...")
+        quant_start = datetime.datetime.now()
+        quant_identity = QuantIdentity(return_quant_tensor=True, bit_width=quant_bits, act_quant=QUANTIZER)
+        for i in range(x_test.shape[1]):
+            x_test[:, i] = quant_identity(torch.tensor(x_test[:, i])).tensor.detach().numpy()
+            x_train[:, i] = quant_identity(torch.tensor(x_train[:, i])).tensor.detach().numpy()
+            
         quant_time = (datetime.datetime.now() - quant_start).total_seconds()
         print(f"   • Quantization completed in {quant_time:.2f}s")
     else:
@@ -122,12 +151,15 @@ def main(args):
     if thermometer_type == "uniform_thermometer":
         print("Using uniform thermometer")
         thermometer = dwn.Thermometer(thermometer_bits).fit(x_train)
+        quant_thermometer = dwn.Thermometer(thermometer_bits).fit(x_train_quant)
     elif thermometer_type == "gaussian_thermometer":
         print("Using gaussian thermometer")
         thermometer = dwn.GaussianThermometer(thermometer_bits).fit(x_train)
+        quant_thermometer = dwn.GaussianThermometer(thermometer_bits).fit(x_train_quant)
     elif thermometer_type == "distributive_thermometer":
         print("Using distributive thermometer")
         thermometer = dwn.DistributiveThermometer(thermometer_bits).fit(x_train)
+        quant_thermometer = dwn.DistributiveThermometer(thermometer_bits).fit(x_train_quant)
     else:
         raise ValueError(f"Unknown thermometer type: {thermometer_type}")
     
@@ -138,9 +170,15 @@ def main(args):
 
     x_train = thermometer.binarize(x_train).flatten(start_dim=1)
     x_test = thermometer.binarize(x_test).flatten(start_dim=1)
+    
+    x_train_quant = thermometer.binarize(x_train_quant).flatten(start_dim=1)
+    x_test_quant = thermometer.binarize(x_test_quant).flatten(start_dim=1)
         
     y_train = torch.tensor(y_train, dtype=torch.int64)
     y_test = torch.tensor(y_test, dtype=torch.int64)
+    
+    x_train_quant = torch.tensor(x_train_quant)
+    x_test_quant = torch.tensor(x_test_quant)
 
     lut_layer = dwn.LUTLayer(x_train.size(1), luts_num, n=luts_inp_num, mapping='learnable') 
     group_sum = dwn.GroupSum(k=num_output, tau=1/0.3)
@@ -209,8 +247,50 @@ def main(args):
             f.write(f"{mapping}")
             if i != len(argmax_vals) - 1:
                 f.write(";")
-
-    return best_acc
+                
+                
+    # Write n samples of the dataset x_test and x_test_quant to a file, the tensors are flattened and unrolled. Both in separate files
+    dataset = [x_test, x_test_quant]
+    output_files = ['x_test.txt', 'x_test_quant.txt']
+    number_of_samples = 10  # Number of samples to write from each dataset
+    
+    for dataset, output_file in zip(dataset, output_files):
+        dataset_path = os.path.join(args.output_folder, output_file)
+        with open(dataset_path, 'w') as f:
+            for i in range(min(number_of_samples, dataset.shape[0])):
+                sample = dataset[i].flatten().cpu().numpy()
+                sample_str = ', '.join(map(str, sample))
+                f.write(f"Sample {i}: {sample_str}\n")
+            
+            
+    # Unroll the thermometer thresholds and save them. Iterate over the thermometer and quant_thermometer if they exist
+    thermometers = [thermometer, quant_thermometer]
+    filenames = ['thermometer_thresholds.txt', 'quant_thermometer_thresholds.txt']
+    
+    # Save the thresholds of the thermometer and quant_thermometer
+    for thermo, filename in zip(thermometers, filenames):
+        if thermo is not None:
+            thermo_path = os.path.join(args.output_folder, filename)
+            with open(thermo_path, 'w') as f:
+                thresholds = thermo.thresholds.cpu().detach().numpy()
+                for i in range(thresholds.shape[0]):
+                    threshold_str = ', '.join(map(str, thresholds[i]))
+                    f.write(f"Thresholds for feature {i}: {threshold_str}\n")
+    
+    quant_acc = 0.0
+    if ptq_enabled:
+        
+        # Print shape x_test_quant and x_test 
+        print(f"x_test_quant shape: {x_test_quant.shape}, x_test shape: {x_test.shape}")
+        print(f"Quantized Test Accuracy at {quant_bits} Bits:")
+        
+        # Print first sample of x_test_quant and x_test
+        print(f"x_test_quant first sample: {x_test_quant[0]}")
+        print(f"x_test first sample: {x_test[0]}")
+        
+        quant_acc = evaluate(model, x_test_quant, y_test, device)
+            
+    return best_acc, quant_acc
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train and evaluate model with configurable output folder, example limit and LUT parameters.')
@@ -223,6 +303,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=15, help='Number of epochs for training')
     parser.add_argument('--batch-size', type=int, default=100, help='Batch size for training')
     parser.add_argument('--quant-bits', type=int, default=-1, help='Number of bits for quantization, -1 for no quantization')
+    parser.add_argument('--ptq', default=False, action='store_true', help='Enable post-training quantization')
     args = parser.parse_args()
     
     # Print command 
@@ -235,38 +316,11 @@ if __name__ == '__main__':
 
     os.makedirs(args.output_folder) 
     
-    accuracy = main(args)
+    accuracy, quant_accuracy = main(args)
     accuracy = round(accuracy * 100, 2)
-        
-    # Create subfolder for this run with the datetime format YYYYMMDD_HHMMSS_run    
-    #now = datetime.datetime.now()
-    #run_folder = now.strftime("%Y%m%d_%H%M%S_run")
-    #args.output_folder = os.path.join(args.output_folder, run_folder)
-    #os.makedirs(args.output_folder)
+    quant_accuracy = round(quant_accuracy * 100, 2)
     
-    # Write call to output folder als txt file
-    #with open(os.path.join(args.output_folder, 'call.txt'), 'w') as f:
-    #    f.write(str_cmd)
-        
-    # Write results to file. If file exists, append to it, but count the number of lines, to get the run number
-    results_md ='results_table.md'
+    print(f"Final Test Accuracy: {accuracy}%")
+    print(f"Quantized Test Accuracy at {args.quant_bits} Bits: {quant_accuracy}%")
+
     
-    if os.path.exists(results_md):
-        with open(results_md, 'r') as f:
-            lines = f.readlines()
-        run_number = len(lines) - 2
-    else:
-        with open(results_md, 'w') as f:
-            f.write("| Run # | Accuracy | LUTs | Inputs/LUT | Thermometer | Therm. Bits | Quant. Bits | Epochs | Batch |\n")
-            f.write("|-------|------|------|------------|-------------|-------------|-------------|--------|-------|\n")
-        run_number = 0
-        
-    quant_bits = args.quant_bits if args.quant_bits > -1 else "No quant"
-            
-    # Write to markdown file
-    with open(results_md, 'a') as f:
-        f.write("| {:<5} | {:<5} | {:<4} | {:<10} | {:<11} | {:<11} | {:<11} | {:<6} | {:<5} |\n".format(
-            run_number + 1, accuracy, args.luts_num, args.luts_inp_num, args.thermometer,
-            args.thermometer_bits, quant_bits, args.epochs, args.batch_size))
-    
-   
