@@ -16,6 +16,8 @@ class EFDFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, output_grad):
+        #print(f"{output_grad.shape=}")
+        
         if output_grad.is_cuda:
             input_grad, luts_grad = efd_cuda.backward(*ctx.saved_tensors, output_grad.contiguous())
         else:

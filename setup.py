@@ -10,14 +10,14 @@ cuda_dir = os.path.join('src', 'torch_dwn', 'custom_operators', 'cuda')
 ext_modules = []
 
 for filename in os.listdir(cpp_dir):
-    if filename[-3:] == 'cpp':
-        ext_modules.append(CppExtension(filename[:-3], [os.path.join(cpp_dir, filename)]))
-
-for filename in os.listdir(cuda_dir):
-    if filename[-3:] == 'cpp':
-        module_name = filename[:-4]
+    if filename.endswith('.cpp') and not filename.endswith('_kernel.cpp'):
+        module_name = filename[:-4]  # Remove '.cpp' (4 characters)
+        # Check if this is a CUDA extension (has a corresponding _kernel.cu file)
         kernel_filename = module_name + '_kernel.cu'
-        ext_modules.append(CUDAExtension(module_name, [os.path.join(cuda_dir, filename), os.path.join(cuda_dir, kernel_filename)]))
+        if os.path.exists(os.path.join(cuda_dir, kernel_filename)):
+            ext_modules.append(CUDAExtension(module_name, [os.path.join(cuda_dir, filename), os.path.join(cuda_dir, kernel_filename)]))
+        else:
+            ext_modules.append(CppExtension(module_name, [os.path.join(cpp_dir, filename)]))
 
 setup(
     name='torch_dwn',
