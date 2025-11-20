@@ -2,6 +2,8 @@
 
 ## Tasks
 
+### Thermometer Encoding with MLPs
+
 ### Evaluation output channels of thermometer encoders
 
 Reducing output channels for Threshold Encoding by search for range 10 - 200 by 20 steps
