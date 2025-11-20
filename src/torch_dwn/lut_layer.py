@@ -16,12 +16,40 @@ class EFDFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, output_grad):
-        #print(f"{output_grad.shape=}")
-        
+        # Unpack saved tensors to access mapping and luts
+        x, mapping, luts, alpha, beta = ctx.saved_tensors
+
+        # Compute base gradients using CUDA kernel
         if output_grad.is_cuda:
-            input_grad, luts_grad = efd_cuda.backward(*ctx.saved_tensors, output_grad.contiguous())
+            input_grad, luts_grad = efd_cuda.backward(x, mapping, luts, alpha, beta, output_grad.contiguous())
         else:
             raise "EFDFunction CPU not Implemented"
+
+        # ========================================
+        # CUSTOM MODIFICATIONS - Access mapping and luts here!
+        # ========================================
+
+        # Example: Analyze connectivity
+        # output_size, n = mapping.shape
+        # input_size = x.shape[1]
+        # connection_counts = torch.bincount(mapping.flatten(), minlength=input_size)
+
+        # Example: Compute per-LUT importance from mapping
+        # lut_importance = torch.zeros(output_size, device=mapping.device)
+        # for i in range(output_size):
+        #     input_bits = mapping[i]
+        #     lut_importance[i] = connection_counts[input_bits].float().mean()
+
+        # Example: Weight gradients by importance
+        # if lut_importance.max() > 0:
+        #     lut_importance = lut_importance / lut_importance.max()
+        #     lut_importance = lut_importance * 0.5 + 0.5  # Scale to [0.5, 1.0]
+        #     luts_grad = luts_grad * lut_importance.unsqueeze(1)
+
+        # ========================================
+        # END MODIFICATIONS
+        # ========================================
+
         return input_grad, None, luts_grad, None, None
 
 class LUTLayer(torch.nn.Module):

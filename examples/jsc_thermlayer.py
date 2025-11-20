@@ -129,18 +129,14 @@ def evaluate(model, x_test, y_test, device):
     return acc
 
 
-def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs, batch_size,
-                       device, threshold_warmup_epochs=0, threshold_update_frequency=1):
+def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_test, epochs, batch_size, device):
     """Train model and evaluate after each epoch"""
     n_samples = x_train.shape[0]
     best_test_acc = 0.0
     best_epoch = 0
-    batch_counter = 0
 
     print("\n" + "="*70)
     print(f"Training for {epochs} epochs (batch_size={batch_size})")
-    print(f"Threshold warmup: {threshold_warmup_epochs} epochs")
-    print(f"Threshold update frequency: every {threshold_update_frequency} batches")
     print("="*70)
 
     for epoch in range(epochs):
@@ -191,9 +187,32 @@ def train_and_evaluate(model, optimizer, scheduler, x_train, y_train, x_test, y_
 # ============================================================================
 
 if __name__ == "__main__":
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='JSC Dataset Classification with DWN LUTLayers')
+    parser.add_argument('--estimator', type=str, default='glt', choices=['ste', 'finite_difference', 'glt'],
+                        help='Estimator type for EncoderLayer: ste, finite_difference, or glt (default: glt)')
+    parser.add_argument('--fixed-thresholds', action='store_true',
+                        help='Keep thresholds fixed (non-trainable) during training')
+    parser.add_argument('--epochs', type=int, default=25,
+                        help='Number of training epochs (default: 25)')
+    parser.add_argument('--lr', type=float, default=1e-3,
+                        help='Learning rate (default: 1e-3)')
+    parser.add_argument('--hidden-size', type=int, default=10,
+                        help='Hidden layer size (default: 10)')
+    parser.add_argument('--thermometer-bits', type=int, default=200,
+                        help='Number of thermometer bits per feature (default: 200)')
+    args = parser.parse_args()
+
     print("="*70)
     print("JSC Dataset Classification with DWN LUTLayers")
     print("="*70)
+    print(f"\nConfiguration:")
+    print(f"  - Estimator: {args.estimator}")
+    print(f"  - Thresholds: {'Fixed (non-trainable)' if args.fixed_thresholds else 'Trainable'}")
+    print(f"  - Epochs: {args.epochs}")
+    print(f"  - Learning rate: {args.lr}")
+    print(f"  - Hidden size: {args.hidden_size}")
+    print(f"  - Thermometer bits: {args.thermometer_bits}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"\nDevice: {device}")
@@ -281,86 +300,214 @@ if __name__ == "__main__":
 
     # Build model with LUTLayers
     print("\nBuilding DWN model with EncoderLayer...")
-    # hidden_size = 16030 to match VC dimension of jsc_default.py (1,025,920 parameters)
-    # Calculation: LUTLayer params = hidden_size × 2^n = 16030 × 64 = 1,025,920
-    learning_rate = 1e-3
-    hidden_size = 10
-    epochs = 25
     num_features = x_train.size(1)
-    thermometer_bits = 200
-
-    # Threshold training control
-    threshold_warmup_epochs = 0  # Don't update thresholds for first N epochs
-    threshold_update_frequency = 1  # Update thresholds every N epochs (1 = every epoch)
-    importance_enable_epoch = 12  # Enable importance weighting after this epoch
 
     model = nn.Sequential(
-        EncoderLayer(num_features, thermometer_bits, input_dataset=x_train),
+        EncoderLayer(num_features, args.thermometer_bits, input_dataset=x_train,
+                     estimator_type=args.estimator),
         nn.Flatten(start_dim=1),
-        dwn.LUTLayer(num_features * thermometer_bits, hidden_size, n=6, mapping='learnable'),
+        dwn.LUTLayer(num_features * args.thermometer_bits, args.hidden_size, n=6, mapping='learnable'),
         dwn.GroupSum(k=num_classes, tau=1/0.3)
     )
 
     model = model.cuda()
 
-    # Enable threshold learning
-    model[0].thresholds.requires_grad = True
+    # Set threshold learning based on argument
+    if args.fixed_thresholds:
+        model[0].thresholds.requires_grad = False
+        print("\n⚠ Thresholds are FIXED (non-trainable)")
+    else:
+        model[0].thresholds.requires_grad = True
+        print("\n✓ Thresholds are TRAINABLE")
 
-    # Single learning rate for all parameters
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # Setup optimizer and scheduler
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, gamma=0.1, step_size=14)
 
     print(f"\nOptimizer configuration:")
-    print(f"  - Learning rate: {learning_rate} (uniform for all parameters)")
-    print(f"  - Importance weighting: enabled at epoch {importance_enable_epoch}")
+    print(f"  - Learning rate: {args.lr}")
+    print(f"  - Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
 
     # Save initial thresholds for comparison (sorted)
     print("\nSaving initial thresholds for plotting...")
     initial_thresholds = torch.sort(model[0].thresholds.data, dim=1)[0].clone()
 
-    # PHASE 1: Train without importance (let LUTs learn connections)
-    print("\n" + "="*70)
-    print(f"PHASE 1: Training without importance ({importance_enable_epoch} epochs)")
-    print("="*70)
+    # Train the model
     best_test_acc, best_epoch = train_and_evaluate(
         model, optimizer, scheduler, x_train, y_train, x_test, y_test,
-        epochs=importance_enable_epoch, batch_size=128, device=device,
-        threshold_warmup_epochs=threshold_warmup_epochs,
-        threshold_update_frequency=threshold_update_frequency
+        epochs=args.epochs, batch_size=128, device=device
     )
-
-    # Extract importance from trained LUT mapping
-    print("\n" + "="*70)
-    print("Extracting importance from trained LUT mapping...")
-    print("="*70)
-    model[0].set_importance_from_lut(model[2], method='weighted', min_weight=0.1)
-
-    importance = model[0].importance_weights
-    print(f"\nImportance statistics:")
-    print(f"  - Mean: {importance.mean():.4f}")
-    print(f"  - Zero importance bits: {(importance == 0).sum().item()} / {importance.numel()}")
-    print(f"  - Coverage: {100 * (importance > 0).float().mean():.1f}% of bits connected")
-
-    # PHASE 2: Continue training WITH importance
-    print("\n" + "="*70)
-    print(f"PHASE 2: Training WITH importance ({epochs - importance_enable_epoch} more epochs)")
-    print("  - Important bits: 100% gradient")
-    print("  - Unused bits: 10% gradient (can still learn!)")
-    print("="*70)
-
-    remaining_epochs = epochs - importance_enable_epoch
-    best_test_acc_phase2, best_epoch_phase2 = train_and_evaluate(
-        model, optimizer, scheduler, x_train, y_train, x_test, y_test,
-        epochs=remaining_epochs, batch_size=128, device=device,
-        threshold_warmup_epochs=0,  # Already warmed up
-        threshold_update_frequency=threshold_update_frequency
-    )
-
-    # Update best results
-    best_test_acc = max(best_test_acc, best_test_acc_phase2)
 
     # Plot threshold comparisons for features 0-15 (sorted)
     print("\nGenerating threshold comparison plots for features 0-15...")
     final_thresholds = torch.sort(model[0].thresholds.data, dim=1)[0]
     plot_thresholds_comparison(initial_thresholds, final_thresholds, x_train, features_to_plot=range(16))
     print("All plots saved!")
+
+    # Mapping and Truth Table Overview
+    print("\n" + "="*70)
+    print("MAPPING AND TRUTH TABLE OVERVIEW")
+    print("="*70)
+
+    lut_layer = model[2]
+
+    # Mapping statistics
+    print(f"\nLUT Layer Configuration:")
+    print(f"  - Input size: {lut_layer.input_size}")
+    print(f"  - Output size: {lut_layer.output_size}")
+    print(f"  - Inputs per LUT (n): {lut_layer.n}")
+    print(f"  - Truth table size per LUT: 2^{lut_layer.n} = {2**lut_layer.n}")
+    print(f"  - Total parameters: {lut_layer.output_size * (2**lut_layer.n):,}")
+
+    # Get mapping
+    if hasattr(lut_layer, 'mapping'):
+        mapping = lut_layer.mapping
+        if hasattr(mapping, 'weights'):
+            # LearnableMapping - extract discrete mapping from weights
+            discrete_mapping = mapping.weights.argmax(dim=0)
+            print(f"\nMapping type: LearnableMapping (soft routing)")
+            print(f"  - Discrete mapping shape: {discrete_mapping.shape}")
+            print(f"  - Weights shape: {mapping.weights.shape}")
+        elif torch.is_tensor(mapping):
+            # Fixed mapping (tensor)
+            discrete_mapping = mapping
+            print(f"\nMapping type: Fixed mapping (tensor)")
+            print(f"  - Mapping shape: {discrete_mapping.shape}")
+        else:
+            # Other mapping type
+            print(f"\nMapping type: {type(mapping).__name__}")
+            discrete_mapping = mapping
+
+        # Mapping statistics
+        print(f"\nMapping Statistics:")
+        unique_inputs = torch.unique(discrete_mapping)
+        print(f"  - Unique inputs used: {len(unique_inputs)} / {lut_layer.input_size}")
+        print(f"  - Coverage: {100 * len(unique_inputs) / lut_layer.input_size:.1f}%")
+
+        # Count connections per input
+        input_connections = torch.zeros(lut_layer.input_size)
+        for inp in unique_inputs:
+            input_connections[inp.item()] = (discrete_mapping == inp).sum().item()
+
+        connected_inputs = (input_connections > 0).sum().item()
+        print(f"  - Connected inputs: {connected_inputs} / {lut_layer.input_size}")
+        print(f"  - Average connections per input: {input_connections[input_connections > 0].mean():.2f}")
+        print(f"  - Max connections to single input: {input_connections.max().item():.0f}")
+        print(f"  - Min connections (non-zero): {input_connections[input_connections > 0].min().item():.0f}")
+
+        # Show first 3 LUTs mapping
+        print(f"\nFirst 3 LUTs - Input Mappings:")
+        for i in range(min(3, lut_layer.output_size)):
+            inputs = discrete_mapping[i].cpu().numpy()
+            print(f"  LUT {i}: inputs = {inputs}")
+
+    # Truth table statistics
+    print(f"\nTruth Table Statistics:")
+    luts = lut_layer.luts.data
+    print(f"  - Shape: {luts.shape}")
+    print(f"  - Mean: {luts.mean().item():.4f}")
+    print(f"  - Std: {luts.std().item():.4f}")
+    print(f"  - Min: {luts.min().item():.4f}")
+    print(f"  - Max: {luts.max().item():.4f}")
+
+    # Sparsity analysis
+    threshold = 0.01
+    sparse_entries = (luts.abs() < threshold).sum().item()
+    total_entries = luts.numel()
+    print(f"  - Entries < {threshold}: {sparse_entries} / {total_entries} ({100*sparse_entries/total_entries:.1f}%)")
+
+    # Show first 2 truth tables
+    print(f"\nFirst 2 LUTs - Truth Tables:")
+    for i in range(min(2, lut_layer.output_size)):
+        tt = luts[i].cpu().numpy()
+        print(f"  LUT {i}: {tt}")
+
+    # Generate detailed LUT report with binarized truth tables
+    print("\n" + "="*70)
+    print("Generating detailed LUT report...")
+    print("="*70)
+
+    report_filename = "lut_report.md"
+    with open(report_filename, 'w') as f:
+        f.write("# LUT Layer Report\n\n")
+        f.write(f"**Configuration:**\n")
+        f.write(f"- Input size: {lut_layer.input_size}\n")
+        f.write(f"- Output size: {lut_layer.output_size}\n")
+        f.write(f"- Inputs per LUT (n): {lut_layer.n}\n")
+        f.write(f"- Truth table size: 2^{lut_layer.n} = {2**lut_layer.n}\n")
+        f.write(f"- Total parameters: {lut_layer.output_size * (2**lut_layer.n):,}\n\n")
+
+        if hasattr(lut_layer, 'mapping'):
+            mapping = lut_layer.mapping
+            if hasattr(mapping, 'weights'):
+                discrete_mapping = mapping.weights.argmax(dim=0).cpu()
+                f.write(f"**Mapping type:** LearnableMapping\n\n")
+            elif torch.is_tensor(mapping):
+                discrete_mapping = mapping.cpu()
+                f.write(f"**Mapping type:** Fixed\n\n")
+            else:
+                discrete_mapping = mapping.cpu() if hasattr(mapping, 'cpu') else mapping
+                f.write(f"**Mapping type:** {type(mapping).__name__}\n\n")
+
+            # Binarize truth tables: > 0 → 1, else → 0
+            luts_continuous = lut_layer.luts.data.cpu()
+            luts_binary = (luts_continuous > 0).int()
+
+            f.write("---\n\n")
+            f.write("## Individual LUT Details\n\n")
+            f.write("*Truth tables binarized: value > 0 → 1, else → 0*\n\n")
+
+            # Write details for each LUT
+            for i in range(lut_layer.output_size):
+                f.write(f"### LUT {i}\n\n")
+
+                # Input mapping
+                inputs = discrete_mapping[i].numpy() if hasattr(discrete_mapping[i], 'numpy') else discrete_mapping[i]
+                f.write(f"**Input mapping:** `{list(inputs)}`\n\n")
+
+                # Continuous truth table stats
+                tt_continuous = luts_continuous[i].numpy()
+                f.write(f"**Continuous truth table stats:**\n")
+                f.write(f"- Mean: {tt_continuous.mean():.4f}\n")
+                f.write(f"- Std: {tt_continuous.std():.4f}\n")
+                f.write(f"- Min: {tt_continuous.min():.4f}\n")
+                f.write(f"- Max: {tt_continuous.max():.4f}\n\n")
+
+                # Binary truth table
+                tt_binary = luts_binary[i].numpy()
+                f.write(f"**Binary truth table (>0 → 1):**\n")
+                f.write(f"```\n{tt_binary}\n```\n\n")
+
+                # Show truth table in table format for smaller LUTs
+                if 2**lut_layer.n <= 64:
+                    f.write(f"**Truth table (table format):**\n\n")
+                    f.write("| Index | Binary Input | Output |\n")
+                    f.write("|-------|--------------|--------|\n")
+                    for idx in range(2**lut_layer.n):
+                        binary_input = format(idx, f'0{lut_layer.n}b')
+                        output = tt_binary[idx]
+                        f.write(f"| {idx:3d} | {binary_input} | {output} |\n")
+                    f.write("\n")
+
+                # Statistics
+                ones_count = tt_binary.sum()
+                zeros_count = len(tt_binary) - ones_count
+                f.write(f"**Binary statistics:**\n")
+                f.write(f"- Ones: {ones_count} / {len(tt_binary)} ({100*ones_count/len(tt_binary):.1f}%)\n")
+                f.write(f"- Zeros: {zeros_count} / {len(tt_binary)} ({100*zeros_count/len(tt_binary):.1f}%)\n\n")
+
+                f.write("---\n\n")
+
+        f.write("\n## Summary Statistics\n\n")
+        f.write(f"- Total LUTs: {lut_layer.output_size}\n")
+        if hasattr(lut_layer, 'mapping'):
+            overall_ones = luts_binary.sum().item()
+            overall_total = luts_binary.numel()
+            f.write(f"- Overall binary distribution: {overall_ones} ones / {overall_total} total ({100*overall_ones/overall_total:.1f}% ones)\n")
+
+    print(f"✓ Report saved to: {report_filename}")
+    print(f"  Contains {lut_layer.output_size} LUTs with binarized truth tables")
+
+    print("\n" + "="*70)
+    print("Analysis complete!")
+    print("="*70)
