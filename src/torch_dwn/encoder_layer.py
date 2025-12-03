@@ -1,90 +1,59 @@
+import numpy as np
 import torch
 import torch.nn as nn
-from .binarization import DistributiveThermometer, Thermometer
-import numpy as np
+
+from .binarization import DistributiveThermometer, LbpThermometer, LbpDistributiveThermometer, LbpDoubleThermometer, Thermometer
 
 
-def compute_bit_importance_from_lut(lut_layer, method='count', normalize=True):
+def compute_lbp_batch(images):
     """
-    Extract importance of each thermometer bit from LUTLayer mapping and truth tables.
+    Compute Local Binary Patterns for a batch of grayscale images.
 
     Args:
-        lut_layer: A trained LUTLayer instance
-        method: How to compute importance:
-            - 'count': Count how many times each bit appears in the mapping
-            - 'weighted': Weight by mean absolute LUT values
-            - 'gradient': Weight by LUT gradient magnitudes (requires .grad)
-        normalize: If True, normalize importance to [0, 1] range
+        images: Tensor of shape (batch, height, width) - grayscale images
 
     Returns:
-        importance: Tensor of shape [input_size] with importance weight for each bit
-
-    Example:
-        >>> importance = compute_bit_importance_from_lut(lut_layer, method='weighted')
-        >>> print(f"Most important bits: {importance.topk(10).indices}")
-        >>> # Reshape to [num_features, num_thresholds] for EncoderLayer
-        >>> importance_per_feature = importance.view(num_features, num_thresholds)
+        lbp_codes: Tensor of shape (batch, height, width) with LBP codes (0-255)
     """
-    from .lut_layer import LearnableMapping
+    batch_size, h, w = images.shape
 
-    # Get the mapping tensor
-    if isinstance(lut_layer.mapping, LearnableMapping):
-        # For learnable mapping, use the dummy mapping (sequential indices after soft routing)
-        # LearnableMapping reorders inputs, then uses sequential connections
-        if hasattr(lut_layer, '_LUTLayer__dummy_mapping'):
-            mapping = lut_layer._LUTLayer__dummy_mapping
-        else:
-            raise ValueError("LearnableMapping detected but cannot access discrete mapping. "
-                           "Use fixed mapping ('random' or 'arange') for importance analysis.")
-    else:
-        mapping = lut_layer.mapping
+    # Zero-pad images: (B, H, W) → (B, H+2, W+2)
+    padded = torch.nn.functional.pad(images, (1, 1, 1, 1), mode='constant', value=0)
 
-    # mapping shape: [output_size, n] where n is inputs per LUT
-    input_size = lut_layer.input_size
+    # Define 8 neighbor offsets (clockwise from top-left)
+    # (dy, dx) pairs
+    neighbors = [
+        (-1, -1), (-1, 0), (-1, 1),  # top row
+        (0, 1),                       # right
+        (1, 1), (1, 0), (1, -1),     # bottom row
+        (0, -1)                       # left
+    ]
 
-    if method == 'count':
-        # Count how many times each input bit appears in the mapping
-        importance = torch.zeros(input_size, dtype=torch.float32, device=mapping.device)
-        unique, counts = torch.unique(mapping, return_counts=True)
-        importance[unique] = counts.float()
+    # Initialize LBP codes
+    lbp_codes = torch.zeros((batch_size, h, w), dtype=torch.float32, device=images.device)
 
-    elif method == 'weighted':
-        # Weight by mean absolute value of LUT truth tables that use each bit
-        importance = torch.zeros(input_size, dtype=torch.float32, device=mapping.device)
-        lut_weights = lut_layer.luts.abs().mean(dim=1)  # [output_size]
+    # Compute LBP for each pixel
+    for i in range(h):
+        for j in range(w):
+            center = padded[:, i+1, j+1]  # (batch,)
+            code = torch.zeros(batch_size, dtype=torch.float32, device=images.device)
 
-        for bit_idx in range(input_size):
-            # Find which LUTs use this bit
-            lut_mask = (mapping == bit_idx).any(dim=1)  # [output_size]
-            if lut_mask.any():
-                importance[bit_idx] = lut_weights[lut_mask].mean()
+            for bit_pos, (dy, dx) in enumerate(neighbors):
+                neighbor_val = padded[:, i+1+dy, j+1+dx]  # (batch,)
+                # Set bit if neighbor >= center
+                bit_value = (neighbor_val >= center).float() * (2 ** bit_pos)
+                code = code + bit_value
 
-    elif method == 'gradient':
-        # Weight by mean absolute gradient magnitude
-        if lut_layer.luts.grad is None:
-            raise ValueError("method='gradient' requires LUT gradients. Run backward pass first.")
+            lbp_codes[:, i, j] = code
 
-        importance = torch.zeros(input_size, dtype=torch.float32, device=mapping.device)
-        lut_grad_mag = lut_layer.luts.grad.abs().mean(dim=1)  # [output_size]
-
-        for bit_idx in range(input_size):
-            lut_mask = (mapping == bit_idx).any(dim=1)
-            if lut_mask.any():
-                importance[bit_idx] = lut_grad_mag[lut_mask].mean()
-
-    else:
-        raise ValueError(f"Unknown method: {method}. Choose 'count', 'weighted', or 'gradient'.")
-
-    if normalize and importance.max() > 0:
-        importance = importance / importance.max()
-
-    return importance
+    return lbp_codes
 
 
 class StraightThroughEstimator(torch.autograd.Function):
     """
     Simple STE: Forward pass uses hard thresholding, backward pass uses identity.
     """
+
     @staticmethod
     def forward(ctx, x, thresholds):
         output = (x > thresholds).float()
@@ -101,6 +70,7 @@ class FiniteDifferenceEstimator(torch.autograd.Function):
     - Forward: Hard thresholding (x > threshold)
     - Backward: Finite difference approximation of gradient w.r.t. thresholds
     """
+
     @staticmethod
     def forward(ctx, x, thresholds, delta=0.00334375):
         ctx.save_for_backward(x, thresholds)
@@ -110,7 +80,6 @@ class FiniteDifferenceEstimator(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        
         x, thresholds = ctx.saved_tensors
         delta = ctx.delta
 
@@ -127,7 +96,7 @@ class FiniteDifferenceEstimator(torch.autograd.Function):
 
         # For input: use straight-through
         grad_input = grad_output
-        
+
         return grad_input, grad_thresholds, None
 
 
@@ -137,6 +106,7 @@ class GLTEstimator(torch.autograd.Function):
     Forward: thermometer encoding using cumulative learned thresholds.
     Backward: rectified STE for threshold gradients, straight-through for input.
     """
+
     @staticmethod
     def forward(ctx, x, latent_thresholds, m=5, p=2):
         """
@@ -156,8 +126,8 @@ class GLTEstimator(torch.autograd.Function):
         ctx.p = p
 
         # Expand thresholds for broadcasting
-        thresholds_exp = thresholds.view(*([1]*x.ndim), -1)  # [1,1,1,1,M]
-        x_exp = x.unsqueeze(-1)                               # [B,C,H,W,1]
+        thresholds_exp = thresholds.view(*([1] * x.ndim), -1)  # [1,1,1,1,M]
+        x_exp = x.unsqueeze(-1)  # [B,C,H,W,1]
 
         # Thermometer encoding
         out = (x_exp >= thresholds_exp).float()
@@ -170,7 +140,7 @@ class GLTEstimator(torch.autograd.Function):
         p = ctx.p
 
         # Expand thresholds
-        thresholds_exp = thresholds.view(*([1]*x.ndim), -1)
+        thresholds_exp = thresholds.view(*([1] * x.ndim), -1)
         x_exp = x.unsqueeze(-1)
 
         # Rectified STE gradient for thresholds
@@ -191,32 +161,65 @@ class GLTEstimator(torch.autograd.Function):
 class EncoderLayer(nn.Module):
     """
     Encoder layer for continuous to binary conversion using learned thresholds.
-    Thermometer encoding with learnable thresholds initialized from data distribution.
+    Supports thermometer encoding, LBP encoding, or combination of both.
     """
 
-    def __init__(self, inputs, output_size, input_dataset=None, estimator_type='glt',
-                 glt_m=5, glt_p=2, **kwargs):
+    def __init__(
+        self,
+        inputs,
+        output_size,
+        input_dataset=None,
+        estimator_type="glt",
+        encoding_type="thermometer",
+        image_shape=None,
+        thermo_type="distributive",
+        glt_m=5,
+        glt_p=2,
+        **kwargs,
+    ):
         """
         Args:
             inputs: Number of input features
-            output_size: Number of thresholds per feature
+            output_size: Number of thresholds per feature (for thermometer modes)
             input_dataset: Dataset to initialize thresholds (required for 'FiniteDifference')
             estimator_type: 'STE', 'ste', 'GLT', 'glt', 'FiniteDifference', or 'finite_difference' (default: 'glt')
+            encoding_type: 'thermometer', 'lbp', or 'lbp+thermometer' (default: 'thermometer')
+            image_shape: (height, width) tuple for LBP modes - required if encoding_type uses 'lbp'
+            thermo_type: Type of thermometer encoding - 'uniform', 'gaussian', or 'distributive' (default: 'distributive')
             glt_m: Parameter m for GLT rectified STE (default: 5)
             glt_p: Parameter p for GLT rectified STE (default: 2)
         """
         super().__init__()
 
+        # Validate and normalize encoding_type
+        valid_encoding_types = ['thermometer', 'lbp', 'lbp+thermometer', 'lbp_distributive', 'lbp_double_thermo']
+        if encoding_type not in valid_encoding_types:
+            raise ValueError(
+                f"Unknown encoding_type: '{encoding_type}'. "
+                f"Choose from: {valid_encoding_types}"
+            )
+        self.encoding_type = encoding_type
+
+        # Validate image_shape for LBP modes
+        if 'lbp' in self.encoding_type or self.encoding_type in ['lbp_distributive', 'lbp_double_thermo']:
+            if image_shape is None:
+                raise ValueError(
+                    f"encoding_type='{encoding_type}' requires image_shape=(height, width)"
+                )
+            self.image_shape = image_shape
+        else:
+            self.image_shape = None
+
         # Normalize estimator_type to handle multiple formats
         # Accept: 'STE', 'ste', 'GLT', 'glt', 'FiniteDifference', 'finite_difference'
         estimator_map = {
-            'ste': 'ste',
-            'straightthrough': 'ste',
-            'glt': 'glt',
-            'finitedifference': 'finite_difference',
-            'finite_difference': 'finite_difference'
+            "ste": "ste",
+            "straightthrough": "ste",
+            "glt": "glt",
+            "finitedifference": "finite_difference",
+            "finite_difference": "finite_difference",
         }
-        normalized_type = estimator_type.lower().replace('_', '').replace('-', '')
+        normalized_type = estimator_type.lower().replace("_", "").replace("-", "")
         if normalized_type not in estimator_map:
             raise ValueError(
                 f"Unknown estimator_type: '{estimator_type}'. "
@@ -226,8 +229,10 @@ class EncoderLayer(nn.Module):
         self.glt_m = glt_m
         self.glt_p = glt_p
         self.inputs = inputs
+        self.thermo_type = thermo_type
+        self.output_size = output_size
 
-        # Convert input_dataset to tensor (needed for both estimator types)
+        # Convert input_dataset to tensor (needed for thermometer initialization)
         if input_dataset is not None:
             if torch.is_tensor(input_dataset):
                 x = input_dataset.detach().clone().float()
@@ -236,29 +241,139 @@ class EncoderLayer(nn.Module):
         else:
             x = None
 
-        if self.estimator_type == 'ste':
-            print("Initializing EncoderLayer with Straight-Through Estimator.")
+        # Initialize LBP+Thermometer encoder if needed
+        if self.encoding_type == 'lbp+thermometer':
+            if x is None:
+                raise ValueError(
+                    "EncoderLayer with 'lbp+thermometer' requires 'input_dataset' to initialize thresholds."
+                )
+
+            # Reshape data to image format for LbpThermometer
+            # x is (batch, features), need to reshape to (batch, height, width)
+            batch_size = x.shape[0]
+            h, w = self.image_shape
+            x_images = x.reshape(batch_size, h, w)
+
+            # Initialize LbpThermometer
+            self.lbp_thermometer = LbpThermometer(
+                num_bits=output_size,
+                feature_wise=False,
+                thermo_type=self.thermo_type
+            )
+            self.lbp_thermometer.fit(x_images)
+
+            # Store thresholds as parameter for compatibility
+            self.thresholds = nn.Parameter(
+                self.lbp_thermometer.thresholds.clone(),
+                requires_grad=True
+            )
+            self.lbp_distributive = None
+            self.lbp_double = None
+            self.importance_min_weight = 0.1
+            return
+
+        # Initialize LBP -> DistributiveThermometer encoder
+        if self.encoding_type == 'lbp_distributive':
+            if x is None:
+                raise ValueError(
+                    "EncoderLayer with 'lbp_distributive' requires 'input_dataset' to initialize thresholds."
+                )
+
+            # Reshape data to image format
+            batch_size = x.shape[0]
+            h, w = self.image_shape
+            x_images = x.reshape(batch_size, h, w)
+
+            # Initialize LbpDistributiveThermometer - fits on LBP-encoded data
+            self.lbp_distributive = LbpDistributiveThermometer(
+                num_bits=output_size,
+                feature_wise=False
+            )
+            self.lbp_distributive.fit(x_images)
+
+            # Store thresholds as parameter
+            self.thresholds = nn.Parameter(
+                self.lbp_distributive.thresholds.clone(),
+                requires_grad=True
+            )
+            self.lbp_thermometer = None
+            self.lbp_double = None
+            self.importance_min_weight = 0.1
+            return
+
+        # Initialize LBP -> Double Thermometer encoder
+        if self.encoding_type == 'lbp_double_thermo':
+            if x is None:
+                raise ValueError(
+                    "EncoderLayer with 'lbp_double_thermo' requires 'input_dataset' to initialize thresholds."
+                )
+
+            # Reshape data to image format
+            batch_size = x.shape[0]
+            h, w = self.image_shape
+            x_images = x.reshape(batch_size, h, w)
+
+            # Initialize LbpDoubleThermometer - two-stage encoding
+            self.lbp_double = LbpDoubleThermometer(
+                num_bits1=output_size,  # First stage bits
+                num_bits2=output_size,  # Second stage bits (same as first)
+                feature_wise=False
+            )
+            self.lbp_double.fit(x_images)
+
+            # Store thresholds2 as parameter (the final stage thresholds)
+            self.thresholds = nn.Parameter(
+                self.lbp_double.thresholds2.clone(),
+                requires_grad=True
+            )
+            self.lbp_thermometer = None
+            self.lbp_distributive = None
+            self.importance_min_weight = 0.1
+            return
+
+        # Initialize thresholds only for thermometer-based encodings
+        if self.encoding_type == 'thermometer':
+            self.lbp_thermometer = None
+            self.lbp_distributive = None
+            self.lbp_double = None
+        else:
+            self.thresholds = None
+            self.importance_min_weight = 0.1
+            self.lbp_thermometer = None
+            self.lbp_distributive = None
+            self.lbp_double = None
+            return
+
+        if self.estimator_type == "ste":
             if x is not None:
                 # Initialize with distributive thresholds from data
-                thermometer = DistributiveThermometer(num_bits=output_size, feature_wise=True)
+                thermometer = DistributiveThermometer(
+                    num_bits=output_size, feature_wise=True
+                )
                 thermometer.fit(x)
                 thresholds = thermometer.thresholds
                 if not torch.is_tensor(thresholds):
                     thresholds = torch.tensor(thresholds, dtype=torch.float32)
             else:
                 # Initialize with uniform linspace if no dataset provided
-                thresholds = torch.linspace(-0.9, 0.9, output_size).unsqueeze(0).repeat(inputs, 1)
+                thresholds = (
+                    torch.linspace(-0.9, 0.9, output_size)
+                    .unsqueeze(0)
+                    .repeat(inputs, 1)
+                )
 
             self.thresholds = nn.Parameter(thresholds, requires_grad=True)
 
-        elif self.estimator_type == 'finite_difference':
-
-            print("Initializing EncoderLayer with Finite Difference Estimator.")
+        elif self.estimator_type == "finite_difference":
             if x is None:
-                raise ValueError("EncoderLayer with 'FiniteDifference' requires 'input_dataset' to initialize thresholds.")
+                raise ValueError(
+                    "EncoderLayer with 'FiniteDifference' requires 'input_dataset' to initialize thresholds."
+                )
 
             # Initialize with distributive thresholds
-            thermometer = DistributiveThermometer(num_bits=output_size, feature_wise=True)
+            thermometer = DistributiveThermometer(
+                num_bits=output_size, feature_wise=True
+            )
             thermometer.fit(x)
             thresholds = thermometer.thresholds
 
@@ -267,8 +382,7 @@ class EncoderLayer(nn.Module):
 
             self.thresholds = nn.Parameter(thresholds, requires_grad=True)
 
-        elif self.estimator_type == 'glt':
-            print("Initializing EncoderLayer with GLT Estimator.")
+        elif self.estimator_type == "glt":
             # GLT uses latent thresholds per feature
             if x is not None:
                 # Initialize with Thermometer from data distribution
@@ -277,68 +391,86 @@ class EncoderLayer(nn.Module):
                 thresholds = thermometer.thresholds
             else:
                 # Initialize with uniform linspace if no dataset provided
-                thresholds = torch.linspace(-0.9, 0.9, output_size).unsqueeze(0).repeat(inputs, 1)
+                thresholds = (
+                    torch.linspace(-0.9, 0.9, output_size)
+                    .unsqueeze(0)
+                    .repeat(inputs, 1)
+                )
             self.thresholds = nn.Parameter(thresholds, requires_grad=True)
 
         # Initialize importance weights as buffer (optional, for importance-weighted training)
         # Don't set it here - will be set via set_importance_from_lut() if needed
         self.importance_min_weight = 0.1  # Default: unused bits get 10% of gradient
 
-    def set_importance_from_lut(self, lut_layer, method='weighted', min_weight=0.1):
-        """
-        Set importance weights from a LUTLayer's mapping and truth tables.
-
-        Uses SOFT weighting: unused bits get min_weight * gradient (not zero),
-        so all thresholds can still learn, just at different rates.
-
-        Args:
-            lut_layer: A LUTLayer instance (after training or with initialized mapping)
-            method: 'count', 'weighted', or 'gradient' (see compute_bit_importance_from_lut)
-            min_weight: Minimum gradient weight for unused bits (0.0-1.0, default: 0.1)
-                       0.0 = hard weighting (unused bits get 0 gradient)
-                       0.1 = soft weighting (unused bits get 10% gradient)
-                       1.0 = no weighting (all bits equal)
-
-        Example:
-            >>> # After training model = EncoderLayer + LUTLayer
-            >>> encoder.set_importance_from_lut(lut_layer, method='weighted', min_weight=0.1)
-            >>> # Now encoder uses importance-weighted gradients (soft weighting)
-        """
-        self.importance_min_weight = min_weight
-        importance = compute_bit_importance_from_lut(lut_layer, method=method, normalize=True)
-
-        # Reshape from [total_bits] to [num_features, num_thresholds]
-        num_features = self.thresholds.shape[0]
-        num_thresholds = self.thresholds.shape[1]
-        importance_per_feature = importance.view(num_features, num_thresholds).detach()
-
-        # Store as buffer (moves with model to GPU but doesn't train)
-        if hasattr(self, 'importance_weights'):
-            # Update existing buffer
-            self.importance_weights.data.copy_(importance_per_feature)
-        else:
-            # Register new buffer
-            self.register_buffer('importance_weights', importance_per_feature)
-        print(f"Set importance weights: shape={importance_per_feature.shape}, "
-              f"range=[{importance_per_feature.min():.4f}, {importance_per_feature.max():.4f}]")
-
     def forward(self, x):
         """
-        Encode input using the selected estimator (finite difference or GLT).
+        Encode input using the selected encoding type and estimator.
 
         Args:
-            x: Input tensor of shape (batch_size, features)
+            x: Input tensor
+               - For LBP modes: (batch_size, features) where features = height * width
+               - For thermometer: (batch_size, features)
 
         Returns:
-            Encoded tensor of shape (batch_size, features, thresholds)
+            Encoded tensor
+            - encoding_type='lbp': (batch_size, features) - LBP codes
+            - encoding_type='thermometer': (batch_size, features, thresholds)
+            - encoding_type='lbp+thermometer': (batch_size, features, thresholds)
         """
         # Convert to tensor if needed
         if not torch.is_tensor(x):
-            x = torch.tensor(x, dtype=torch.float32, device=self.thresholds.device)
+            device = self.thresholds.device if self.thresholds is not None else 'cpu'
+            x = torch.tensor(x, dtype=torch.float32, device=device)
         else:
-            x = x.to(self.thresholds.device).float()
+            device = self.thresholds.device if self.thresholds is not None else x.device
+            x = x.to(device).float()
 
-        if self.estimator_type == 'ste':
+        # Handle LBP encoding modes
+        if 'lbp' in self.encoding_type or self.encoding_type in ['lbp_distributive', 'lbp_double_thermo']:
+            # Reshape flattened features back to images: (B, H*W) → (B, H, W)
+            batch_size = x.shape[0]
+            h, w = self.image_shape
+            images = x.view(batch_size, h, w)
+
+            if self.encoding_type == 'lbp':
+                # LBP only: compute and return
+                lbp_codes = compute_lbp_batch(images)  # (batch, height, width)
+                return lbp_codes.view(batch_size, -1)  # (batch, height*width)
+
+            elif self.encoding_type == 'lbp+thermometer':
+                # Use LbpThermometer class for combined encoding
+                # Update thresholds in the encoder to use learned values
+                self.lbp_thermometer.thresholds = self.thresholds.data.clone()
+
+                # Apply LBP + Thermometer encoding
+                encoded = self.lbp_thermometer.binarize(images)  # (batch, height*width, 8+num_bits)
+
+                # Return in format (batch, pixels, features) to match thermometer encoding
+                # The nn.Flatten layer will flatten this to (batch, pixels*features)
+                return encoded  # (batch, height*width, 8+num_bits)
+
+            elif self.encoding_type == 'lbp_distributive':
+                # LBP then distributive thermometer on LBP values
+                # Update thresholds in the encoder to use learned values
+                self.lbp_distributive.thresholds = self.thresholds.data.clone()
+
+                # Apply LBP + Distributive Thermometer encoding
+                encoded = self.lbp_distributive.binarize(images)  # (batch, height*width, num_bits)
+
+                return encoded  # (batch, height*width, num_bits)
+
+            elif self.encoding_type == 'lbp_double_thermo':
+                # LBP → Thermo1 → sum → Thermo2
+                # Update thresholds2 in the encoder to use learned values
+                self.lbp_double.thresholds2 = self.thresholds.data.clone()
+
+                # Apply two-stage encoding
+                encoded = self.lbp_double.binarize(images)  # (batch, height*width, num_bits2)
+
+                return encoded  # (batch, height*width, num_bits2)
+
+        # Thermometer encoding (for 'thermometer' or 'lbp+thermometer')
+        if self.estimator_type == "ste":
             # Straight-Through Estimator
             if self.training:
                 with torch.no_grad():
@@ -348,7 +480,7 @@ class EncoderLayer(nn.Module):
             x_expanded = x.unsqueeze(-1)
             encoded = StraightThroughEstimator.apply(x_expanded, sorted_thresholds)
 
-        elif self.estimator_type == 'finite_difference':
+        elif self.estimator_type == "finite_difference":
             # Clamp and sort thresholds to keep them in valid range [-1, 1]
             if self.training:
                 with torch.no_grad():
@@ -358,7 +490,7 @@ class EncoderLayer(nn.Module):
             x_expanded = x.unsqueeze(-1)
             encoded = FiniteDifferenceEstimator.apply(x_expanded, sorted_thresholds)
 
-        elif self.estimator_type == 'glt':
+        elif self.estimator_type == "glt":
             # GLT estimator with latent thresholds per feature
             # Note: GLT transforms thresholds via cumsum to keep them in [-1, 1] automatically
             # But we clamp to be safe during training
@@ -372,7 +504,9 @@ class EncoderLayer(nn.Module):
             for i in range(self.inputs):
                 x_feature = x[:, i]  # [batch]
                 latent_thresh_feature = self.thresholds[i]  # [num_thresholds]
-                encoded_feature = GLTEstimator.apply(x_feature, latent_thresh_feature, self.glt_m, self.glt_p)
+                encoded_feature = GLTEstimator.apply(
+                    x_feature, latent_thresh_feature, self.glt_m, self.glt_p
+                )
                 encoded_list.append(encoded_feature)
             encoded = torch.stack(encoded_list, dim=1)  # [batch, features, thresholds]
 
